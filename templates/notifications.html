@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en" class="page-notifications">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Notification Settings</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="page-notifications">
+  <h3>Notification Settings</h3>
+
+  {% if saved %}
+    <div class="banner saved">Settings saved</div>
+  {% endif %}
+
+  {% if test == 'sent' %}
+    <div class="banner saved">Test notification sent</div>
+  {% elif test == 'failed' %}
+    <div class="banner error">Test notification failed. Check email, app password, recipients, and SMTP settings.</div>
+  {% endif %}
+
+  {% if error %}
+    <div class="banner error">Please check the highlighted setting and try again.</div>
+  {% endif %}
+
+  <form method="POST" class="card">
+    <label for="garage_name">Garage Name</label>
+    <input id="garage_name" name="garage_name" value="{{ garage_name }}" autocomplete="off">
+
+    <label for="sender_email">Sender Email</label>
+    <input id="sender_email" name="sender_email" value="{{ sender_email }}" inputmode="email" autocomplete="username">
+
+    <label for="sender_app_password">Sender App Password</label>
+    <input id="sender_app_password" name="sender_app_password" value="{{ sender_app_password }}" type="password" autocomplete="current-password">
+    <div class="hint">Use your Gmail app password, not your regular Gmail password.</div>
+
+    <label for="text_to">Text Recipients</label>
+    <input id="text_to" name="text_to" value="{{ text_to }}" autocomplete="off">
+    <div class="hint">Separate multiple recipients with commas.</div>
+
+    <label for="smtp_server">SMTP Server</label>
+    <input id="smtp_server" name="smtp_server" value="{{ smtp_server }}" autocomplete="off">
+
+    <label for="smtp_port">SMTP Port</label>
+    <input id="smtp_port" name="smtp_port" value="{{ smtp_port }}" inputmode="numeric" autocomplete="off">
+
+    <div class="button-row">
+      <button type="submit" name="action" value="save">Save</button>
+      <button class="test-button" type="submit" name="action" value="test">Save + Test</button>
+    </div>
+  </form>
+
+  <div class="nav-links">
+    <a href="/setup">Door Setup</a>
+    <a href="/">Main Page</a>
+  </div>
+</body>
+</html>

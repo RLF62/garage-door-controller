@@ -1,0 +1,8 @@
+[Unit]
+Description=Check Truck Garage Wi-Fi Every 6 Hours
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=6h
+Unit=garage-wifi-roam.service
+[Install]
+WantedBy=timers.target

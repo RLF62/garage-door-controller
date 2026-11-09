@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en" class="page-diagnostics">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ garage_name }} Diagnostics</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body class="page-diagnostics">
+  <div class="diagnostics-container">
+    <h1>{{ garage_name }} Diagnostics</h1>
+
+    <div class="intro quick-check">
+      <b>Best first check:</b> Run the commands in Quick Controller Check from an SSH terminal. This page only copies commands; it does not execute them.
+    </div>
+
+    {% macro command(text, explanation) -%}
+      <div class="command-card">
+        <div class="command-line">
+          <code>{{ text }}</code>
+          <button type="button" class="copy-button" data-command="{{ text|e }}">Copy</button>
+        </div>
+        <p>{{ explanation }}</p>
+      </div>
+    {%- endmacro %}
+
+    <details open>
+      <summary>Quick Controller Check</summary>
+      <div class="command-list">
+        {{ command('sudo systemctl status garage.service --no-pager', 'Checks whether the garage application is active and shows recent errors.') }}
+        {{ command('iw dev wlan0 link', 'Shows the connected Wi-Fi network, access point, signal strength, and link speed.') }}
+        {{ command('ls -l /dev/serial0', 'Confirms that the Pico UART device exists and shows its physical UART mapping.') }}
+        {{ command('sudo journalctl -u garage.service -n 100 --no-pager', 'Shows the 100 most recent garage-service log entries.') }}
+        {{ command('vcgencmd get_throttled', 'Checks for present or previous undervoltage and thermal throttling. The ideal result is throttled=0x0.') }}
+      </div>
+    </details>
+
+    <details>
+      <summary>Garage Service</summary>
+      <div class="command-list">
+        {{ command('sudo systemctl status garage.service --no-pager', 'Displays service state, start time, process information, and recent messages.') }}
+        {{ command('sudo systemctl restart garage.service', 'Restarts the garage application without rebooting the Pi.') }}
+        {{ command('sudo systemctl stop garage.service', 'Stops the garage application and releases resources such as the Pico serial port.') }}
+        {{ command('sudo systemctl start garage.service', 'Starts the garage application after testing or maintenance.') }}
+        {{ command('sudo systemctl enable garage.service', 'Configures the application to start automatically during boot.') }}
+        {{ command('sudo systemctl cat garage.service', 'Displays the service configuration, Python command, working directory, and restart policy.') }}
+        {{ command('ps aux | grep app.py | grep -v grep', 'Confirms directly whether app.py is running.') }}
+        {{ command('systemctl --type=service --state=running | grep -Ei "garage|serial|pico"', 'Finds related running services that might affect the controller or serial port.') }}
+      </div>
+    </details>
+
+    <details>
+      <summary>Logs</summary>
+      <div class="command-list">
+        {{ command('sudo journalctl -u garage.service -n 150 --no-pager', 'Shows the 150 most recent garage application messages.') }}
+        {{ command('sudo journalctl -u garage.service -f', 'Watches garage messages live. Press Ctrl+C to stop.') }}
+        {{ command('sudo journalctl -u garage.service -b --no-pager', 'Shows garage-service messages from the current boot.') }}
+        {{ command('journalctl -b -1 -e --no-pager', 'Shows the end of the previous boot log when persistent journaling is available.') }}
+        {{ command('tail -f /home/pi/garage/status.log', 'Watches new controller status messages as they are written. Press Ctrl+C to stop.') }}
+        {{ command('tail -n 100 /home/pi/garage/status.log', 'Shows the latest 100 lines of the controller status log.') }}
+      </div>
+    </details>
+
+    <details>
+      <summary>Pico and UART</summary>
+      <div class="command-list">
+        {{ command('ls -l /dev/serial0 /dev/serial1', 'Shows the standard serial aliases and the physical UART assigned to each one.') }}
+        {{ command('ls -l /dev/serial*', 'Lists all standard serial devices and aliases.') }}
+        {{ command('ls -l /dev/ttyS0 /dev/ttyAMA0', 'Checks the two likely physical UART devices.') }}
+        {{ command('sudo fuser -v /dev/serial0 /dev/ttyS0 /dev/ttyAMA0', 'Identifies any process currently using the Pico serial port.') }}
+        {{ command('systemctl status serial-getty@ttyS0.service', 'Checks whether the Linux login console is competing for the Pico UART.') }}
+        {{ command('grep -n "enable_uart" /boot/firmware/config.txt', 'Confirms that the Raspberry Pi UART is enabled.') }}
+        {{ command('cat /boot/firmware/cmdline.txt', 'Checks whether the kernel is configured to use the UART as a serial console.') }}
+      </div>
+    </details>
+
+    <div class="warning">
+      <b>Direct UART testing:</b> Stop garage.service first so the application and terminal do not use the Pico UART at the same time. Start it again when finished.
+    </div>
+
+    <details>
+      <summary>Direct Pico Communication</summary>
+      <div class="command-list">
+        {{ command('sudo systemctl stop garage.service', 'Stops the application before direct serial testing.') }}
+        {{ command('sudo stty -F /dev/ttyS0 115200 raw -echo', 'Configures the UART to match the Pico at 115200 baud in raw mode.') }}
+        {{ command('timeout 10 cat /dev/ttyS0', 'Displays Pico output for ten seconds and then exits.') }}
+        {{ command('echo -e "LIGHT\\n" | sudo tee /dev/ttyS0', 'Sends LIGHT directly to the Pico, bypassing Flask and the normal serial reader.') }}
+        {{ command('sudo systemctl start garage.service', 'Restarts the normal garage application after direct testing.') }}
+      </div>
+    </details>
+
+    <details>
+      <summary>USB and Pico Power</summary>
+      <div class="command-list">
+        {{ command('lsusb', 'Shows whether the Pi detects a Pico connected through USB.') }}
+        {{ command('sudo dmesg -w', 'Watches kernel messages while plugging in the Pico. Press Ctrl+C to stop.') }}
+        {{ command('dmesg -T | grep -iE "usb|tty|cdc|pico"', 'Filters the kernel log for Pico, USB, and serial-device events.') }}
+        {{ command('lsblk', 'Shows storage devices; a Pico in BOOTSEL mode normally appears as RPI-RP2.') }}
+      </div>
+    </details>
+
+    <details>
+      <summary>Wi-Fi and Network</summary>
+      <div class="command-list">
+        {{ command('iw dev wlan0 link', 'Shows live Wi-Fi connection details and signal strength.') }}
+        {{ command('iwgetid -r', 'Shows only the name of the connected Wi-Fi network.') }}
+        {{ command('hostname -I', 'Displays the controller IP address.') }}
+        {{ command('ip addr', 'Displays detailed addresses and interface states.') }}
+        {{ command('ip route', 'Shows the default route to the router.') }}
+        {{ command('ping -c 4 192.168.1.1', 'Tests communication with the local router. Change the address if the router uses another IP.') }}
+        {{ command('ping -c 4 8.8.8.8', 'Tests internet connectivity without relying on DNS.') }}
+        {{ command('ping -c 4 google.com', 'Tests both internet access and DNS resolution.') }}
+        {{ command('nmcli device status', 'Shows whether NetworkManager considers wlan0 connected.') }}
+        {{ command('nmcli connection show --active', 'Shows the active NetworkManager connection profile.') }}
+      </div>
+    </details>
+
+    <details>
+      <summary>Network Watchdog</summary>
+      <div class="command-list">
+        {{ command('sudo systemctl status network-watchdog.service --no-pager', 'Checks the network-recovery service.') }}
+        {{ command('sudo systemctl restart network-watchdog.service', 'Restarts the network watchdog.') }}
+        {{ command('sudo journalctl -u network-watchdog.service -n 100 --no-pager', 'Shows recent watchdog actions and errors.') }}
+      </div>
+    </details>
+
+    <details>
+      <summary>Dashboard and API</summary>
+      <div class="command-list">
+        {{ command('sudo ss -ltnp | grep :5000', 'Checks whether Flask is listening on port 5000 and shows the owning process.') }}
+        {{ command('curl http://localhost:5000', 'Loads the dashboard locally from the controller.') }}
+        {{ command('curl http://localhost:5000/position', 'Returns the current door-position value.') }}
+        {{ command('curl http://localhost:5000/vent_status', 'Returns the current vent state.') }}
+        {{ command('curl http://localhost:5000/environment_temp', 'Tests the BME280 temperature path through the application.') }}
+        {{ command('curl http://localhost:5000/environment_humidity', 'Tests the BME280 humidity path through the application.') }}
+        {{ command('curl http://localhost:5000/system_status', 'Returns the Pico online state and age of the latest serial update.') }}
+        {{ command('curl http://localhost:5000/network_status', 'Returns the dashboard network and watchdog status as JSON.') }}
+        {{ command('curl -X POST http://localhost:5000/command/light', 'Tests the complete Flask-to-GPIO-to-Pico LIGHT command path.') }}
+      </div>
+    </details>
+
+    <details>
+      <summary>Temperature and I2C</summary>
+      <div class="command-list">
+        {{ command('curl http://localhost:5000/environment_temp', 'Checks the controller temperature endpoint.') }}
+        {{ command('curl http://localhost:5000/environment_humidity', 'Checks the controller humidity endpoint.') }}
+        {{ command('sudo i2cdetect -y 1', 'Scans I2C bus 1. The BME280 should normally appear at address 0x76 or 0x77.') }}
+        {{ command('ls -l /dev/i2c-1', 'Confirms that Linux created the primary I2C device.') }}
+        {{ command('vcgencmd measure_temp', 'Shows the Raspberry Pi CPU temperature.') }}
+      </div>
+    </details>
+
+    <details>
+      <summary>Power, SD Card, and Storage</summary>
+      <div class="command-list">
+        {{ command('vcgencmd get_throttled', 'Checks current and historical undervoltage and thermal flags. The ideal result is throttled=0x0.') }}
+        {{ command('vcgencmd measure_volts', 'Shows the Pi core voltage for general diagnostics; it is not a direct 5 V input measurement.') }}
+        {{ command('dmesg -T | grep -iE "voltage|under-voltage|mmc|error"', 'Searches for undervoltage, SD-card, and general kernel errors.') }}
+        {{ command('dmesg -T | grep -iE "voltage|under-voltage|mmc|usb|error|fail|reset"', 'Performs a broader search for hardware errors and resets.') }}
+        {{ command('df -h /', 'Shows free space on the controller system partition.') }}
+        {{ command('dmesg -T | grep -iE "mmc|ext4|i/o error"', 'Searches specifically for SD-card and filesystem errors.') }}
+      </div>
+    </details>
+
+    <details>
+      <summary>Files, Updates, and Restart</summary>
+      <div class="command-list">
+        {{ command('stat /home/pi/garage/app.py', 'Shows the installed app.py modification time, ownership, and size.') }}
+        {{ command('watch -n 1 stat /home/pi/garage/status.log', 'Refreshes the status-log timestamp every second. Press Ctrl+C to stop.') }}
+        {{ command('curl -L https://raw.githubusercontent.com/RLF62/ota_garage_door_opener/main/version.json', 'Displays the online Pico firmware-version information.') }}
+        {{ command('sudo reboot', 'Safely restarts the entire controller.') }}
+        {{ command('sudo shutdown -h now', 'Safely shuts down the Pi before power is disconnected.') }}
+      </div>
+    </details>
+
+    <div class="diagnostics-nav">
+      <a href="/setup">← Back to Setup</a>
+      <a href="/">Back to Garage</a>
+    </div>
+  </div>
+
+  <script>
+    document.querySelectorAll('.copy-button').forEach(button => {
+      button.addEventListener('click', async () => {
+        const command = button.dataset.command;
+        const original = button.textContent;
+        try {
+          await navigator.clipboard.writeText(command);
+          button.textContent = 'Copied!';
+        } catch (error) {
+          const input = document.createElement('textarea');
+          input.value = command;
+          document.body.appendChild(input);
+          input.select();
+          document.execCommand('copy');
+          input.remove();
+          button.textContent = 'Copied!';
+        }
+        setTimeout(() => { button.textContent = original; }, 1400);
+      });
+    });
+  </script>
+</body>
+</html>

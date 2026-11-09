@@ -1,0 +1,8 @@
+[Unit]
+Description=Truck Garage Wi-Fi Roaming Check
+Wants=NetworkManager.service
+After=NetworkManager.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/pi/garage/garage_wifi_roam.py --apply
+TimeoutStartSec=90

@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="en" class="page-setup">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ garage_name }} Setup</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+</head>
+
+<body class="page-setup">
+  <div class="setup-container">
+    <h1>{{ garage_name }} Setup</h1>
+
+    <div class="live-values">
+      <div>Position: <span id="posval">{{ position }}</span></div>
+      <div>Position Inch: <span id="posval_in">{{ position_in }}</span></div>
+      <div>Light Level: <span id="lightlevel">0</span></div>
+    </div>
+
+    {% if error %}
+    <div class="error-banner">
+      Setup error — check the values and try again.
+    </div>
+    {% endif %}
+
+    <div class="form-container">
+      <form method="post" action="/setup">
+
+
+        <div class="section-title">Garage Display Name</div>
+
+        <div class="form-group">
+          <label>Garage Name</label>
+          <input type="text" id="garage_name" name="garage_name" value="{{ garage_name }}" required>
+          <small>This name is shown at the top of the main, setup, and automation pages.</small>
+        </div>
+
+        <div class="section-title">Door / Sensor Settings</div>
+
+        <div class="form-group">
+          <label>Vent Distance</label>
+          <input type="number" name="vent_dist" value="{{ vent_dist }}" min="1" max="300" required>
+          <small>Sensor reading when the door is vented.</small>
+        </div>
+
+        <div class="form-group">
+          <label>Open Distance</label>
+          <input type="number" name="min_dist" value="{{ min_dist }}" min="1" max="300" required>
+          <small>Sensor reading when the door is fully open.</small>
+        </div>
+
+        <div class="form-group">
+          <label>Closed Distance</label>
+          <input type="number" name="max_dist" value="{{ max_dist }}" min="1" max="300" required>
+          <small>Sensor reading when the door is fully closed.</small>
+        </div>
+
+        <div class="form-group">
+          <label>Light Level On</label>
+          <input type="number" name="light_level" value="{{ light_level }}" min="0" max="65535" required>
+          <small>Light sensor value used to decide if the garage light is on.</small>
+        </div>
+
+        <div class="section-title">Network Settings</div>
+
+        <div class="status-card">
+          <div><b>Current Pi IP:</b> {{ local_ip }}</div>
+          <div><b>Connected SSID:</b> {{ wifi_ssid }}</div>
+          <div><b>Ping Target:</b> <span id="currentPingIp">{{ ping_ip }}</span></div>
+          </div>
+
+        <div class="form-group">
+          <label>Ping Test IP Address</label>
+          <input type="text" id="ping_ip" name="ping_ip" value="{{ ping_ip }}" required>
+          <small>Used by the network watchdog to verify Wi-Fi/network connectivity.</small>
+        </div>
+
+        <button type="button" class="test-button" id="testPingButton">Test Ping</button>
+        <div id="pingResult"></div>
+
+
+        <div class="section-title">Wi-Fi Roaming</div>
+        <div class="status-card">
+          <div><b>Current access point:</b> <span id="wifiCurrentBssid">Loading...</span></div>
+          <div><b>Signal:</b> <span id="wifiCurrentRssi">Loading...</span></div>
+          <div><b>Last check:</b> <span id="wifiLastCheck">Not run</span></div>
+          <div><b>Last result:</b> <span id="wifiLastResult">Not run</span></div>
+        </div>
+        <div class="form-group">
+          <label><input type="checkbox" name="wifi_roam_enabled" {% if wifi_roam_enabled %}checked{% endif %}> Enable preferred AP checks</label>
+          <small>Save preference for the 6-hour checker. This version does not switch access points.</small>
+        </div>
+        <div class="form-group">
+          <label>Preferred access point MAC (BSSID)</label>
+          <input type="text" name="wifi_preferred_bssid" value="{{ wifi_preferred_bssid }}" placeholder="AA:BB:CC:DD:EE:FF" maxlength="17" pattern="[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}">
+          <small>Use the BSSID for the FISCHER network, not FISCHER_IoT.</small>
+        </div>
+        <div class="form-group">
+          <label>Minimum improvement</label>
+          <select name="wifi_roam_min_db">
+            {% for db in [5, 10, 15] %}<option value="{{ db }}" {% if wifi_roam_min_db == db %}selected{% endif %}>{{ db }} dB</option>{% endfor %}
+          </select>
+          <small>Checks every 6 hours once the timer is installed. Roaming stays in test mode until verified.</small>
+        </div>
+
+        <div class="section-title">Second Garage Door Link</div>
+
+        <div class="form-group">
+          <label>
+            <input type="checkbox" id="second_door_enabled" name="second_door_enabled" {% if second_door_enabled %}checked{% endif %}>
+            Show Second Door Link on Main Page
+          </label>
+          <small>When enabled, the main garage page shows a link to another garage controller.</small>
+        </div>
+
+        <div class="form-group">
+          <label>Second Door Name</label>
+          <input type="text" id="second_door_name" name="second_door_name" value="{{ second_door_name }}">
+          <small>Example: Truck Garage, Car Garage, Shop Door.</small>
+        </div>
+
+        <div class="form-group">
+          <label>Second Door IP Address</label>
+          <input type="text" id="second_door_ip" name="second_door_ip" value="{{ second_door_ip }}" placeholder="192.168.1.156">
+          <small>Enter just the IP address. Port 5000 is added automatically. Full URLs also work.</small>
+        </div>
+
+
+
+        <div class="section-title">Logging</div>
+
+        <div class="form-group">
+          <label>
+            <input type="checkbox" name="event_logging_enabled" {% if event_logging_enabled %}checked{% endif %}>
+            Enable Event Logging
+          </label>
+          <small>When enabled, records web/API/autoclose/Pico button events to button_log.txt.</small>
+        </div>
+
+        <div class="button-row">
+          <a href="/" class="back-button">← Back to Garage</a>
+          <a href="/notifications" class="link-button">🔔 Notifications</a>
+          <a href="/automation_setup" class="link-button automation-button">⚙️ Automation Setup</a>
+          <a href="/pico_update" class="link-button">⬆️ Pico Firmware Update</a>
+		  <a href="/diagnostics" class="link-button diagnostics-button">🩺 Diagnostics &amp; Test Commands</a>
+		  <input type="submit" value="Save Settings" class="submit-button">
+        </div>
+
+        
+      </form>
+    </div>
+  </div>
+
+  <script>
+    function fetchNoStore(url, options = {}) {
+      return fetch(url, {
+        cache: 'no-store',
+        ...options,
+        headers: {
+          'Cache-Control': 'no-store',
+          ...(options.headers || {})
+        }
+      });
+    }
+
+    function updatePosition() {
+      fetchNoStore('/position')
+        .then(response => response.text())
+        .then(positionStr => {
+          const raw = parseInt(positionStr);
+          document.getElementById('posval').textContent = isNaN(raw) ? "--" : raw;
+        })
+        .catch(() => {});
+    }
+
+    function updateActualPosition() {
+      fetchNoStore('/position_in')
+        .then(response => response.text())
+        .then(positionStr => {
+          const raw = parseInt(positionStr);
+          document.getElementById('posval_in').textContent = isNaN(raw) ? "--" : raw;
+        })
+        .catch(() => {});
+    }
+
+    function updateLightLevel() {
+      fetchNoStore('/light_level')
+        .then(response => response.text())
+        .then(level => {
+          const val = parseInt(level);
+          document.getElementById('lightlevel').textContent = isNaN(val) ? "--" : val;
+        })
+        .catch(() => {});
+    }
+
+    function updateAll() {
+      updatePosition();
+      updateActualPosition();
+      updateLightLevel();
+    }
+
+    const pingInput = document.getElementById('ping_ip');
+    const currentPingIp = document.getElementById('currentPingIp');
+
+    if (pingInput && currentPingIp) {
+      pingInput.addEventListener('input', function() {
+        currentPingIp.textContent = this.value || '--';
+      });
+    }
+
+    document.getElementById('testPingButton').addEventListener('click', function() {
+      const resultBox = document.getElementById('pingResult');
+      const button = this;
+      resultBox.className = '';
+      resultBox.style.display = 'block';
+      resultBox.textContent = 'Testing ping...';
+      button.disabled = true;
+
+      fetchNoStore('/test_ping')
+        .then(response => response.json())
+        .then(data => {
+          if (data.ok) {
+            resultBox.className = 'ok';
+            resultBox.textContent = 'Online ✅ ' + data.ping_ip + (data.latency_ms !== null ? ' — ' + data.latency_ms + ' ms' : '');
+          } else {
+            resultBox.className = 'fail';
+            resultBox.textContent = 'Offline ❌ ' + data.ping_ip;
+          }
+        })
+        .catch(() => {
+          resultBox.className = 'fail';
+          resultBox.textContent = 'Ping test failed ❌';
+        })
+        .finally(() => {
+          button.disabled = false;
+        });
+    });
+
+    document.querySelector("form").addEventListener("submit", function(e) {
+      const openDist = parseInt(document.querySelector('[name="min_dist"]').value);
+      const closedDist = parseInt(document.querySelector('[name="max_dist"]').value);
+      const ventDist = parseInt(document.querySelector('[name="vent_dist"]').value);
+      const pingIp = document.querySelector('[name="ping_ip"]').value.trim();
+      const secondDoorEnabled = document.querySelector('[name="second_door_enabled"]').checked;
+      const secondDoorIp = document.querySelector('[name="second_door_ip"]').value.trim();
+
+      if (openDist >= closedDist) {
+        alert("Open Distance must be less than Closed Distance.");
+        e.preventDefault();
+        return;
+      }
+
+      if (ventDist <= openDist || ventDist >= closedDist) {
+        alert("Vent Distance must be between Open and Closed Distance.");
+        e.preventDefault();
+        return;
+      }
+
+      if (!pingIp) {
+        alert("Ping Test IP Address cannot be blank.");
+        e.preventDefault();
+        return;
+      }
+
+      if (secondDoorEnabled && !secondDoorIp) {
+        alert("Second Door IP Address cannot be blank when the second door link is enabled.");
+        e.preventDefault();
+        return;
+      }
+    });
+
+    async function updateWifiRoamStatus() {
+      try {
+        const response = await fetchNoStore('/api/wifi_roam_status');
+        if (!response.ok) return;
+        const s = await response.json();
+        document.getElementById('wifiCurrentBssid').textContent = s.bssid || 'Not connected';
+        document.getElementById('wifiCurrentRssi').textContent = s.rssi == null ? 'Unknown' : s.rssi + ' dBm';
+        document.getElementById('wifiLastCheck').textContent = s.last_check || 'Not run';
+        document.getElementById('wifiLastResult').textContent = s.last_result || 'Not run';
+      } catch (err) { /* Keep last reading on temporary network errors. */ }
+    }
+    updateWifiRoamStatus();
+    setInterval(updateWifiRoamStatus, 30000);
+
+    updateAll();
+    let updateTimer = setInterval(updateAll, 1000);
+
+    document.addEventListener("visibilitychange", () => {
+      if (document.hidden) {
+        clearInterval(updateTimer);
+      } else {
+        updateAll();
+        updateTimer = setInterval(updateAll, 1000);
+      }
+    });
+  </script>
+</body>
+</html>

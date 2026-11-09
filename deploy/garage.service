@@ -1,0 +1,14 @@
+[Unit]
+Description=Garage Flask App
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/garage
+ExecStart=/usr/bin/python3 /home/pi/garage/app.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

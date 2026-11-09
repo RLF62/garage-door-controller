@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+.venv/
+/*.json
+/*.log
+/*.jsonl
+/*.tmp
+/button_log.txt
+/pico_updates/
+/pico_backups/
+/wifi-backups/
+/wifi-install/
+*.zip
+*.tar.gz
+.env*

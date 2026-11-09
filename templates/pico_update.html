@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en" class="page-setup">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ garage_name }} Pico Firmware Update</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <style>
+    .ota-card {
+      margin: 18px 0;
+      padding: 16px;
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(16, 24, 40, 0.96), rgba(30, 41, 59, 0.96));
+      border: 1px solid rgba(148, 163, 184, 0.35);
+      box-shadow: 0 14px 35px rgba(0,0,0,0.25);
+      color: #e5e7eb;
+    }
+    .ota-header { display: flex; justify-content: space-between; gap: 12px; align-items: center; margin-bottom: 12px; }
+    .ota-title { font-size: 1.25rem; font-weight: 800; }
+    .ota-subtitle { font-size: 0.9rem; opacity: 0.78; margin-top: 3px; }
+    .ota-badge { padding: 8px 12px; border-radius: 999px; font-weight: 800; font-size: 0.85rem; white-space: nowrap; }
+    .ota-badge.idle { background: #334155; color: #e2e8f0; }
+    .ota-badge.ok { background: #14532d; color: #bbf7d0; }
+    .ota-badge.warn { background: #78350f; color: #fde68a; }
+    .ota-badge.run { background: #1e3a8a; color: #bfdbfe; }
+    .ota-badge.fail { background: #7f1d1d; color: #fecaca; }
+    .ota-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .ota-tile { background: rgba(15, 23, 42, 0.72); border: 1px solid rgba(148, 163, 184, 0.18); border-radius: 14px; padding: 12px; }
+    .ota-label { font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.08em; opacity: 0.72; }
+    .ota-value { font-size: 1.05rem; font-weight: 800; margin-top: 4px; overflow-wrap: anywhere; }
+    .ota-small { font-size: 0.82rem; opacity: 0.72; margin-top: 4px; overflow-wrap: anywhere; }
+    .ota-notes { margin: 12px 0; padding: 10px; background: rgba(15, 23, 42, 0.5); border-radius: 12px; }
+    .ota-progress-wrap { margin-top: 10px; }
+    .ota-progress-row { display: flex; justify-content: space-between; margin-bottom: 6px; font-weight: 700; }
+    .ota-progress-bar { height: 18px; border-radius: 999px; overflow: hidden; background: rgba(148, 163, 184, 0.25); border: 1px solid rgba(148, 163, 184, 0.25); }
+    .ota-progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, #22c55e, #38bdf8); transition: width 0.35s ease; }
+    .ota-buttons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; }
+    .ota-buttons button { flex: 1 1 160px; }
+    .ota-buttons .danger { background: #b91c1c; }
+    .ota-message { display:none; margin-top: 10px; padding: 10px; border-radius: 10px; font-weight: 700; }
+    .ota-message.ok { display:block; background:#14532d; color:#dcfce7; }
+    .ota-message.fail { display:block; background:#7f1d1d; color:#fee2e2; }
+    .ota-message.info { display:block; background:#1e3a8a; color:#dbeafe; }
+    .ota-compare { margin-top: 10px; padding: 10px; border-radius: 12px; font-weight: 800; background: rgba(51, 65, 85, 0.72); color: #e2e8f0; }
+    .ota-compare.ok { background: rgba(20, 83, 45, 0.82); color: #dcfce7; }
+    .ota-compare.warn { background: rgba(120, 53, 15, 0.82); color: #fde68a; }
+    .ota-compare.fail { background: rgba(127, 29, 29, 0.82); color: #fee2e2; }
+    @media (max-width: 620px) {
+      .ota-grid { grid-template-columns: 1fr; }
+      .ota-header { align-items: flex-start; flex-direction: column; }
+    }
+  </style>
+</head>
+
+<body class="page-setup">
+  <div class="setup-container">
+    <h1>{{ garage_name }} Pico Firmware</h1>
+
+    <div class="form-container">
+      <div class="ota-card">
+        <div class="ota-header">
+          <div>
+            <div class="ota-title">GitHub OTA Update</div>
+            <div class="ota-subtitle">Update the Pico over UART without opening the garage controller.</div>
+          </div>
+          <div id="otaBadge" class="ota-badge idle">Idle</div>
+        </div>
+
+        <div class="ota-grid">
+          <div class="ota-tile">
+            <div class="ota-label">Installed Pico</div>
+            <div id="otaCurrent" class="ota-value">--</div>
+            <div id="otaCurrentUpdated" class="ota-small">--</div>
+          </div>
+          <div class="ota-tile">
+            <div class="ota-label">GitHub Latest</div>
+            <div id="otaLatest" class="ota-value">--</div>
+            <div id="otaGithubChecked" class="ota-small">Not checked</div>
+          </div>
+        </div>
+
+        <div class="ota-notes">
+          <b>Release notes:</b> <span id="otaNotes">--</span>
+        </div>
+
+        <div id="otaCompare" class="ota-compare">Run Check GitHub to compare versions.</div>
+
+        <div class="ota-progress-wrap">
+          <div class="ota-progress-row">
+            <span id="otaStateText">Idle</span>
+            <span id="otaProgressText">0%</span>
+          </div>
+          <div class="ota-progress-bar">
+            <div id="otaProgressFill" class="ota-progress-fill" style="width: 0%;"></div>
+          </div>
+          <div id="otaDetail" class="ota-small">Waiting for update check.</div>
+        </div>
+
+        <div class="ota-buttons">
+          <button type="button" class="test-button" id="refreshFwButton">Refresh Pico Version</button>
+          <button type="button" class="test-button" id="checkUpdateButton">Check GitHub</button>
+          <button type="button" class="test-button danger" id="installUpdateButton">Install Update</button>
+        </div>
+
+        <div id="otaMessage" class="ota-message"></div>
+      </div>
+
+      <div class="ota-card">
+        <div class="ota-title">Diagnostics</div>
+        <label style="display:flex;align-items:center;gap:10px;margin-top:12px;cursor:pointer;">
+          <input type="checkbox" id="diagnosticsEnabled" disabled style="width:auto;">
+          <span>Enable Diagnostic Capture</span>
+        </label>
+        <p class="ota-small">Enable Pico diagnostic messages and save movement captures on the Zero. Turning this off keeps existing captures.</p>
+        <div id="diagnosticsMessage" class="ota-small" role="status" aria-live="polite">Loading setting…</div>
+        <p><a href="/static/pico_code_guide.html" target="_blank" rel="noopener" style="color:#93c5fd;">Pico Code Explanation</a></p>
+      </div>
+
+      <div class="button-row">
+        <a href="/setup" class="back-button">← Back to Setup</a>
+        <a href="/" class="link-button">Garage Main Page</a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    function fetchNoStore(url, options = {}) {
+      return fetch(url, {
+        cache: 'no-store',
+        ...options,
+        headers: {
+          'Cache-Control': 'no-store',
+          ...(options.headers || {})
+        }
+      });
+    }
+
+    const diagnosticsCheckbox = document.getElementById('diagnosticsEnabled');
+    const diagnosticsMessage = document.getElementById('diagnosticsMessage');
+    let diagnosticsSaving = false;
+    function displayDiagnostics(data) {
+      diagnosticsCheckbox.checked = data.enabled;
+      diagnosticsCheckbox.disabled = false;
+      diagnosticsMessage.textContent = data.confirmed
+        ? (data.enabled ? 'Diagnostics enabled on Pico and Zero.' : 'Diagnostics disabled on Pico and Zero.')
+        : 'Setting saved. Waiting for Pico confirmation…';
+    }
+    function refreshDiagnostics() {
+      if (diagnosticsSaving) return Promise.resolve();
+      return fetchNoStore('/diagnostics_settings')
+        .then(async response => {
+          const data = await response.json();
+          if (!response.ok || !data.ok) throw new Error(data.error || 'Could not load diagnostics');
+          if (!diagnosticsSaving) displayDiagnostics(data);
+        })
+        .catch(error => { if (!diagnosticsSaving) diagnosticsMessage.textContent = error.message; });
+    }
+    diagnosticsCheckbox.addEventListener('change', async () => {
+      diagnosticsSaving = true;
+      const enabled = diagnosticsCheckbox.checked;
+      diagnosticsCheckbox.disabled = true;
+      diagnosticsMessage.textContent = 'Saving…';
+      try {
+        const response = await fetchNoStore('/diagnostics_settings', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ enabled })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) throw new Error(data.error || 'Could not save diagnostics');
+        displayDiagnostics(data);
+      } catch (error) {
+        diagnosticsCheckbox.checked = !enabled;
+        diagnosticsMessage.textContent = error.message;
+      } finally {
+        diagnosticsSaving = false;
+        diagnosticsCheckbox.disabled = false;
+      }
+    });
+    refreshDiagnostics();
+    setInterval(refreshDiagnostics, 2000);
+
+    const otaEls = {
+      badge: document.getElementById('otaBadge'),
+      current: document.getElementById('otaCurrent'),
+      currentUpdated: document.getElementById('otaCurrentUpdated'),
+      latest: document.getElementById('otaLatest'),
+      githubChecked: document.getElementById('otaGithubChecked'),
+      notes: document.getElementById('otaNotes'),
+      stateText: document.getElementById('otaStateText'),
+      progressText: document.getElementById('otaProgressText'),
+      progressFill: document.getElementById('otaProgressFill'),
+      detail: document.getElementById('otaDetail'),
+      message: document.getElementById('otaMessage'),
+      compare: document.getElementById('otaCompare'),
+      refreshBtn: document.getElementById('refreshFwButton'),
+      checkBtn: document.getElementById('checkUpdateButton'),
+      installBtn: document.getElementById('installUpdateButton')
+    };
+
+    function setOtaMessage(text, kind = 'info') {
+      otaEls.message.className = 'ota-message ' + kind;
+      otaEls.message.textContent = text;
+    }
+
+    function clearOtaMessage() {
+      otaEls.message.className = 'ota-message';
+      otaEls.message.textContent = '';
+    }
+
+    function setOtaButtonState(running, canInstall = true) {
+      otaEls.refreshBtn.disabled = running;
+      otaEls.checkBtn.disabled = running;
+      otaEls.installBtn.disabled = running || !canInstall;
+    }
+
+    function updateOtaDisplay(data) {
+      if (!data) return;
+      const state = data.update_state || 'idle';
+      const progress = Number(data.progress || 0);
+      const running = ['queued', 'starting', 'sending'].includes(state);
+
+      otaEls.current.textContent = data.current_version || 'Unknown';
+      otaEls.currentUpdated.textContent = data.current_updated ? ('Updated: ' + data.current_updated) : 'Waiting for Pico response';
+      otaEls.latest.textContent = data.latest_version || 'Unknown';
+      otaEls.githubChecked.textContent = data.github_checked ? ('Checked: ' + data.github_checked) : 'Not checked yet';
+      otaEls.notes.textContent = data.latest_notes || '--';
+      otaEls.stateText.textContent = state.toUpperCase();
+      otaEls.progressText.textContent = Math.round(progress) + '%';
+      otaEls.progressFill.style.width = Math.max(0, Math.min(100, progress)) + '%';
+
+      otaEls.compare.textContent = data.comparison_message || 'Run Check GitHub to compare versions.';
+      otaEls.compare.className = 'ota-compare';
+      if (data.version_relation === 'newer') otaEls.compare.classList.add('warn');
+      else if (data.version_relation === 'same') otaEls.compare.classList.add('ok');
+      else if (data.version_relation === 'older') otaEls.compare.classList.add('fail');
+
+      if (state === 'sending') {
+        otaEls.detail.textContent = 'Sent ' + (data.sent || 0) + ' of ' + (data.size || 0) + ' bytes in ' + (data.chunks || 0) + ' chunks.';
+      } else if (state === 'success') {
+        otaEls.detail.textContent = 'Update complete. Pico should reboot and report the new version.';
+      } else if (state === 'failed') {
+        otaEls.detail.textContent = 'Update failed: ' + (data.error || 'unknown error');
+      } else if (state === 'queued') {
+        otaEls.detail.textContent = 'Update queued. Waiting for serial reader to start transfer.';
+      } else if (data.update_available) {
+        otaEls.detail.textContent = 'A newer GitHub firmware appears to be available.';
+      } else if (data.version_relation === 'older') {
+        otaEls.detail.textContent = 'Install is disabled because GitHub has an older version than the Pico.';
+      } else if (data.version_relation === 'same') {
+        otaEls.detail.textContent = 'Installed firmware matches GitHub. No update needed.';
+      } else {
+        otaEls.detail.textContent = 'No update running.';
+      }
+
+      otaEls.badge.className = 'ota-badge idle';
+      otaEls.badge.textContent = 'Idle';
+      if (running) {
+        otaEls.badge.className = 'ota-badge run';
+        otaEls.badge.textContent = 'Updating';
+      } else if (state === 'success') {
+        otaEls.badge.className = 'ota-badge ok';
+        otaEls.badge.textContent = 'Success';
+      } else if (state === 'failed' || state === 'cancelled') {
+        otaEls.badge.className = 'ota-badge fail';
+        otaEls.badge.textContent = 'Failed';
+      } else if (data.update_available) {
+        otaEls.badge.className = 'ota-badge warn';
+        otaEls.badge.textContent = 'Update Available';
+      } else if (data.version_relation === 'older') {
+        otaEls.badge.className = 'ota-badge fail';
+        otaEls.badge.textContent = 'GitHub Older';
+      } else if (data.version_relation === 'same') {
+        otaEls.badge.className = 'ota-badge ok';
+        otaEls.badge.textContent = 'Up To Date';
+      } else if (data.latest_version && data.latest_version !== 'Unknown') {
+        otaEls.badge.className = 'ota-badge ok';
+        otaEls.badge.textContent = 'Checked';
+      }
+
+      setOtaButtonState(running, Boolean(data.can_install));
+    }
+
+    function refreshOtaStatus() {
+      return fetchNoStore('/pico_update_status')
+        .then(response => response.json())
+        .then(updateOtaDisplay)
+        .catch(() => {});
+    }
+
+    function postOta(url, workingText) {
+      clearOtaMessage();
+      setOtaMessage(workingText, 'info');
+      setOtaButtonState(true);
+
+      return fetchNoStore(url, { method: 'POST' })
+        .then(response => response.json().then(data => ({ ok: response.ok, data })))
+        .then(result => {
+          if (!result.ok || !result.data.ok) {
+            throw new Error(result.data.error || 'Request failed');
+          }
+          if (result.data.status) updateOtaDisplay(result.data.status);
+          setOtaMessage('Request started successfully.', 'ok');
+        })
+        .catch(err => {
+          setOtaMessage(err.message || 'OTA request failed', 'fail');
+        })
+        .finally(refreshOtaStatus);
+    }
+
+    otaEls.refreshBtn.addEventListener('click', () => {
+      postOta('/pico_fw_refresh', 'Requesting Pico firmware version...');
+    });
+
+    otaEls.checkBtn.addEventListener('click', () => {
+      postOta('/github_update_check', 'Checking GitHub for latest Pico firmware...');
+    });
+
+    otaEls.installBtn.addEventListener('click', () => {
+      if (otaEls.installBtn.disabled) return;
+      if (!confirm('Install the newer Pico firmware from GitHub now? Garage motion will be locked out during the update.')) return;
+      postOta('/github_update_install', 'Starting GitHub OTA install...');
+    });
+
+    refreshOtaStatus().then(() => {
+      postOta('/pico_fw_refresh', 'Refreshing Pico firmware version...')
+        .then(() => setTimeout(() => {
+          postOta('/github_update_check', 'Checking GitHub for latest Pico firmware...');
+        }, 900));
+    });
+
+    let otaTimer = setInterval(refreshOtaStatus, 1000);
+
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        clearInterval(otaTimer);
+      } else {
+        refreshOtaStatus();
+        otaTimer = setInterval(refreshOtaStatus, 1000);
+      }
+    });
+  </script>
+</body>
+</html>

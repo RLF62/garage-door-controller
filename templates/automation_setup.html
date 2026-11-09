@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en" class="page-automation">
+<head>
+  <meta charset="UTF-8">
+  <title>{{ garage_name }} Automation Setup</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+
+<body class="page-automation">
+  <h1>{{ garage_name }} Automation</h1>
+
+  {% if error %}
+  <div class="error-banner">
+    Automation setup error — check the values and try again.
+  </div>
+  {% endif %}
+
+  <div class="form-container">
+    <div class="section-title">Current Automation Status</div>
+
+    <div class="status-card">
+      <div><b>Auto Close:</b>
+        {% if status.auto_close_enabled %}
+          <span class="enabled">Enabled</span> at {{ status.auto_close_time }}
+        {% else %}
+          <span class="disabled">Disabled</span>
+        {% endif %}
+      </div>
+      <div><b>Auto Vent:</b>
+        {% if status.auto_vent_enabled %}
+          <span class="enabled">Enabled</span> at {{ status.auto_vent_temp_f }}°F
+        {% else %}
+          <span class="disabled">Disabled</span>
+        {% endif %}
+      </div>
+      <div><b>Vent Window:</b> {{ status.auto_vent_start_time }} to {{ status.auto_vent_stop_time }}</div>
+      <div><b>Vent Allowed Now:</b>
+        {% if status.auto_vent_time_allowed %}
+          <span class="enabled">Yes</span>
+        {% else %}
+          <span class="disabled">No</span>
+        {% endif %}
+      </div>
+      <div><b>Current Temp:</b> {{ status.current_temp_f if status.current_temp_f else '--' }}°F</div>
+      <div><b>Door Position:</b> {{ status.position if status.position != '' else '--' }}%</div>
+      <div><b>Next Action:</b> {{ status.next_action }}</div>
+    </div>
+
+    <form method="post" action="/automation_setup">
+      <div class="section-title">Auto Close</div>
+
+      <div class="form-group">
+        <label>
+          <input type="checkbox" name="auto_close_enabled" {% if auto_close_enabled %}checked{% endif %}>
+          Enable Auto-Close
+        </label>
+        <small>Automatically closes the door at the set time if the door is not already closed.</small>
+      </div>
+
+      <div class="form-group">
+        <label>Auto-Close Time</label>
+        <input type="time" name="auto_close_time" value="{{ auto_close_time }}" required>
+      </div>
+
+      <div class="section-title">Auto Vent</div>
+
+      <div class="form-group">
+        <label>
+          <input type="checkbox" name="auto_vent_enabled" {% if auto_vent_enabled %}checked{% endif %}>
+          Enable Auto-Vent
+        </label>
+        <small>Automatically vents the door when garage temperature reaches the set temperature.</small>
+      </div>
+
+      <div class="form-group">
+        <label>Auto-Vent Temperature °F</label>
+        <input type="number" name="auto_vent_temp_f" value="{{ auto_vent_temp_f }}" min="60" max="150" required>
+      </div>
+
+      <div class="form-group">
+        <label>Auto-Vent Start Time</label>
+        <input type="time" id="auto_vent_start_time" name="auto_vent_start_time" value="{{ auto_vent_start_time }}" required>
+        <small>Auto-Vent will not run before this time.</small>
+      </div>
+
+      <div class="form-group">
+        <label>Auto-Vent Stop Time</label>
+        <input type="time" id="auto_vent_stop_time" name="auto_vent_stop_time" value="{{ auto_vent_stop_time }}" required>
+        <small>Auto-Vent will not run at or after this time. Set it to match Auto-Close Time if you want venting blocked after nightly close.</small>
+      </div>
+
+      <div class="button-row">
+        <a href="/" class="back-button">← Back to Garage</a>
+        <a href="/setup" class="setup-button">Door Setup</a>
+      </div>
+
+      <input type="submit" value="Save Automation Settings" class="submit-button">
+    </form>
+  </div>
+
+  <script>
+    const automationForm = document.querySelector("form");
+
+    if (automationForm) {
+      automationForm.addEventListener("submit", function(e) {
+        const ventStartEl = document.querySelector('[name="auto_vent_start_time"]');
+        const ventStopEl = document.querySelector('[name="auto_vent_stop_time"]');
+        const ventTempEl = document.querySelector('[name="auto_vent_temp_f"]');
+
+        const ventStart = ventStartEl ? ventStartEl.value : "";
+        const ventStop = ventStopEl ? ventStopEl.value : "";
+        const ventTemp = ventTempEl ? parseInt(ventTempEl.value) : NaN;
+
+      if (ventStart === ventStop) {
+        alert("Auto-Vent Start Time and Stop Time cannot be the same.");
+        e.preventDefault();
+        return;
+      }
+
+        if (isNaN(ventTemp) || ventTemp < 60 || ventTemp > 150) {
+          alert("Auto-Vent Temperature must be between 60°F and 150°F.");
+          e.preventDefault();
+        }
+      });
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="en" class="page-index">
+<head>
+  <meta charset="UTF-8">
+  <link rel="manifest" href="/static/manifest.json">
+  <link rel="icon" type="image/png" sizes="512x402" href="/static/icons/garage.png">
+  <meta name="theme-color" content="#0d6efd">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>{{ garage_name }} Control</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <style>
+    /* Keep the page title clear of the mobile browser chrome while preserving
+       enough room for the controls at the bottom of a phone screen. */
+    @media (max-width: 430px) {
+      body.page-index {
+        padding-top: 6px;
+        padding-bottom: 8px;
+      }
+
+      html.page-index h3 {
+        margin-top: 10px;
+      }
+
+      html.page-index .button-grid {
+        row-gap: 4px;
+        margin-bottom: 3px;
+      }
+
+      html.page-index .command-button {
+        min-height: 40px;
+      }
+    }
+  </style>
+</head>
+
+<body class="page-index">
+<div id="savedBanner" aria-live="polite">
+  <span class="check">✓</span>
+  <span class="text">Settings saved</span>
+</div>
+
+<h3>{{ garage_name }}</h3>
+{% if second_door_enabled and second_door_url %}
+<div class="garage-selector">
+    <a href="{{ second_door_url }}">{{ second_door_name }} →</a>
+</div>
+{% endif %}
+<div class="door-wrap">
+  <div class="door">
+    <img src="{{ url_for('static', filename='garage.png') }}" class="garage-image" alt="Garage Interior">
+    <div class="door-fill" id="doorFill">
+      <div class="door-panel"></div>
+      <div class="door-panel"></div>
+      <div class="door-panel"></div>
+      <div class="door-panel"></div>
+      <div class="door-panel"></div>
+    </div>
+  </div>
+</div>
+
+<div class="status-strip">
+  <div class="pill">
+    <div class="pill-label">Door</div>
+    <div id="door-state" class="pill-value door-unknown">--</div>
+  </div>
+	<div class="pill">
+	  <div class="pill-label">Pico</div>
+	  <div id="pico-state" class="pill-value door-unknown">--</div>
+	  <div id="pico-age">--</div>
+	</div>
+</div>
+
+
+<div hidden>
+  <div>Position: <span id="posval">0</span>%</div>
+</div>
+
+<div class="status-panel status-panel-combo">
+  <div class="status-left">
+    <div class="status-item">
+      <span class="label">🌡️ Temp:</span>
+      <span class="value"><span id="temp_f">--</span>°F</span>
+    </div>
+    <div class="status-item">
+      <span class="label">💧 Humidity:</span>
+      <span class="value"><span id="humidity">--</span>%</span>
+    </div>
+    <div class="status-item">
+      <span class="label">📶 Wi-Fi:</span>
+      <span class="value"><span id="wifi-ssid">...</span><br><span id="wifi-percent">...</span>% (<span id="wifi-rssi">...</span> dBm)</span>
+    </div>
+  </div>
+
+  <div class="status-right">
+<div class="mini-status fan-box">
+  <button id="fan-test-button" type="button" title="Run fan for 5 seconds" aria-label="Test CPU fan for 5 seconds" style="all:unset;cursor:pointer;">CPU Fan</button>
+  <img id="fan-icon" src="/static/fan.png" alt="Fan status">
+  <div id="fan-test-message" role="status" aria-live="polite" style="font-size:0.75rem;" hidden></div>
+  <div class="cpu-temp"><span id="cpu-temp">--</span>°F</div>
+</div>
+
+<div class="mini-status light-wrap">
+  <span>Light</span>
+  <div id="light-indicator" class="led off"></div>
+</div>
+  </div>
+</div>
+
+<div class="button-grid">
+  <button type="button" class="command-button" data-command="open">Open</button>
+  <button type="button" class="command-button" data-command="close">Close</button>
+  <button type="button" class="command-button" data-command="light">Light</button>
+  <button type="button" class="command-button" data-command="vent">Vent</button>
+  <button type="button" id="autoVentButton" class="command-button auto-vent-button auto-vent-unknown">
+    AUTO VENT --
+  </button>
+</div>
+
+<div id="last-command" class="last-command">Last command: none</div>
+
+<a id="setupLink" href="/setup">Door Setup</a><span id="savedInline">Saved ✓</span>
+<!--
+<a id="automationLink" href="/automation_setup">Automation</a>
+-->
+<script>
+  let lastClamped = null;
+  let previousClamped = null;
+  let previousPositionAt = 0;
+  let ventStatus = 0;
+  const deadband = 2;
+  const visualDeadband = 2;
+  let firstLoad = true;
+  let commandBusy = false;
+  let lastCommandAt = 0;
+  let picoLastSeen = null;
+  let autoVentEnabled = null;
+  let autoVentBusy = false;
+  
+  function setText(id, value) {
+    const el = document.getElementById(id);
+    if (el) {
+      el.textContent = value;
+      if (id === 'fan-test-message') el.hidden = !value;
+    }
+  }
+
+  function fetchNoStore(url, options = {}) {
+    return fetch(url, {
+      cache: 'no-store',
+      ...options,
+      headers: {
+        'Cache-Control': 'no-store',
+        ...(options.headers || {})
+      }
+    });
+  }
+
+  function setCommandButtonsDisabled(disabled) {
+    document.querySelectorAll('.command-button').forEach(button => button.disabled = disabled);
+  }
+
+  function sendCommand(cmd) {
+    const now = Date.now();
+    if (commandBusy || (now - lastCommandAt) < 750) return;
+
+    commandBusy = true;
+    lastCommandAt = now;
+    setCommandButtonsDisabled(true);
+
+    fetchNoStore('/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command: cmd })
+    })
+    .then(response => {
+      if (!response.ok) {
+        return fetchNoStore('/command/' + encodeURIComponent(cmd), { method: 'POST' });
+      }
+      return response;
+    })
+    .then(() => {
+      const label = cmd.toUpperCase();
+      setText('last-command', 'Last command: ' + label + ' at ' + new Date().toLocaleTimeString());
+    })
+    .catch(() => {
+      setText('last-command', 'Command failed: ' + cmd.toUpperCase());
+    })
+    .finally(() => {
+      setTimeout(() => {
+        commandBusy = false;
+        setCommandButtonsDisabled(false);
+      }, 750);
+    });
+  }
+
+  function renderAutoVentButton() {
+    const button = document.getElementById('autoVentButton');
+    if (!button) return;
+
+    button.classList.remove('auto-vent-enabled', 'auto-vent-disabled', 'auto-vent-unknown');
+
+    if (autoVentBusy) {
+      button.disabled = true;
+      button.classList.add('auto-vent-unknown');
+      button.textContent = 'UPDATING...';
+      return;
+    }
+
+    button.disabled = false;
+
+    if (autoVentEnabled === true) {
+      button.classList.add('auto-vent-enabled');
+      button.textContent = 'AUTO VENT ON';
+    } else if (autoVentEnabled === false) {
+      button.classList.add('auto-vent-disabled');
+      button.textContent = 'AUTO VENT OFF';
+    } else {
+      button.classList.add('auto-vent-unknown');
+      button.textContent = 'AUTO VENT --';
+    }
+  }
+
+  function updateAutoVentButton() {
+    return fetchNoStore('/auto_vent_enabled')
+      .then(response => {
+        if (!response.ok) throw new Error('Auto Vent status unavailable');
+        return response.text();
+      })
+      .then(state => {
+        const value = state.trim().toLowerCase();
+        if (value === '1' || value === 'true') autoVentEnabled = true;
+        else if (value === '0' || value === 'false') autoVentEnabled = false;
+        else autoVentEnabled = null;
+        renderAutoVentButton();
+      })
+      .catch(() => {
+        autoVentEnabled = null;
+        renderAutoVentButton();
+      });
+  }
+
+  function toggleAutoVent() {
+    if (autoVentBusy || autoVentEnabled === null) {
+      updateAutoVentButton();
+      return;
+    }
+
+    const newState = !autoVentEnabled;
+    autoVentBusy = true;
+    renderAutoVentButton();
+
+    fetchNoStore('/set_auto_vent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: newState })
+    })
+    .then(response => {
+      if (!response.ok) throw new Error('Auto Vent update failed');
+      return response.json();
+    })
+    .then(data => {
+      autoVentEnabled = Boolean(data.auto_vent_enabled);
+      setText(
+        'last-command',
+        'Auto Vent ' + (autoVentEnabled ? 'enabled' : 'disabled') +
+        ' at ' + new Date().toLocaleTimeString()
+      );
+    })
+    .catch(() => setText('last-command', 'Auto Vent update failed'))
+    .finally(() => {
+      autoVentBusy = false;
+      renderAutoVentButton();
+      setTimeout(updateAutoVentButton, 250);
+    });
+  }
+
+  function updateDoorState(clamped) {
+    const el = document.getElementById('door-state');
+    if (!el) return;
+
+    let state = '--';
+    let cls = 'door-unknown';
+
+    if (ventStatus) {
+      state = 'VENTED';
+      cls = 'door-vent';
+    } else if (previousClamped !== null && Math.abs(clamped - previousClamped) >= 2 && (Date.now() - previousPositionAt) < 4000) {
+      state = clamped > previousClamped ? 'CLOSING' : 'OPENING';
+      cls = 'door-moving';
+    } else if (clamped <= 2) {
+      state = 'OPEN';
+      cls = 'door-open';
+    } else if (clamped >= 98) {
+      state = 'CLOSED';
+      cls = 'door-closed';
+    } else {
+      state = clamped + '%';
+      cls = 'door-vent';
+    }
+
+    el.className = 'pill-value ' + cls;
+    el.textContent = state;
+  }
+
+  function updateVentStatus() {
+    return fetchNoStore('/vent_status')
+      .then(response => response.text())
+      .then(status => { ventStatus = parseInt(status.trim()) || 0; })
+      .catch(() => { ventStatus = 0; });
+  }
+
+  function updatePosition() {
+    // Door graphic now follows actual LIDAR position only.
+    // Vent status affects the label, not the visual position.
+    fetchNoStore('/position')
+      .then(response => response.text())
+      .then(positionStr => {
+        let raw = parseInt(positionStr);
+        if (isNaN(raw)) return;
+        const clamped = Math.max(0, Math.min(100, raw));
+		if (lastClamped !== null && Math.abs(clamped - lastClamped) < visualDeadband) {
+		  updateDoorState(lastClamped);
+		  return;
+		}
+
+        previousClamped = lastClamped;
+        previousPositionAt = Date.now();
+        lastClamped = clamped;
+
+        setText('posval', clamped);
+        updateDoorState(clamped);
+
+        const door = document.getElementById('doorFill');
+        const doorBox = document.querySelector('.door');
+        const maxDrop = doorBox ? doorBox.clientHeight : 154;
+        const offset = (clamped / 100) * maxDrop;
+
+        if (firstLoad) {
+          door.style.transition = 'none';
+          door.style.transform = `scaleY(-1) translateY(${-offset}px)`;
+          void door.offsetWidth;
+          door.style.transition = '';
+          firstLoad = false;
+        } else {
+          door.style.transform = `scaleY(-1) translateY(${-offset}px)`;
+        }
+      })
+      .catch(() => {});
+  }
+
+  function updateEnvironment() {
+    fetchNoStore('/environment_temp')
+      .then(response => response.text())
+      .then(temp => setText('temp_f', temp.trim() || '--'))
+      .catch(() => setText('temp_f', '--'));
+
+    fetchNoStore('/environment_humidity')
+      .then(response => response.text())
+      .then(humidity => setText('humidity', humidity.trim() || '--'))
+      .catch(() => setText('humidity', '--'));
+  }
+
+  let fanTestRequestBusy = false;
+  let fanTestActive = false;
+
+  function updateFanTestStatus() {
+    return fetchNoStore('/fan_test_status')
+      .then(response => {
+        if (!response.ok) throw new Error('Fan status unavailable');
+        return response.json();
+      })
+      .then(data => {
+        fanTestActive = Boolean(data.test_active);
+        const button = document.getElementById('fan-test-button');
+        button.disabled = fanTestRequestBusy || fanTestActive || !data.ready;
+        button.title = fanTestActive ? 'Fan test running' : 'Run fan for 5 seconds';
+        setText('fan-test-message', fanTestActive
+          ? 'Testing… ' + Math.ceil(data.remaining_seconds) + 's'
+          : (data.ready ? '' : 'Fan controller starting…'));
+        const icon = document.getElementById('fan-icon');
+        icon.classList.toggle('fan-spinning', data.fan === 'on');
+      })
+      .catch(() => {
+        setText('fan-test-message', 'Fan status unavailable');
+      });
+  }
+
+  function testFan() {
+    if (fanTestRequestBusy || fanTestActive) return;
+    fanTestRequestBusy = true;
+    document.getElementById('fan-test-button').disabled = true;
+    setText('fan-test-message', 'Starting test…');
+    fetchNoStore('/fan_test', { method: 'POST' })
+      .then(async response => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Fan test failed');
+        fanTestActive = true;
+        setText('fan-test-message', 'Testing… 5s');
+      })
+      .catch(error => {
+        setText('fan-test-message', error.message || 'Fan test failed');
+      })
+      .finally(() => {
+        fanTestRequestBusy = false;
+        document.getElementById('fan-test-button').disabled = fanTestActive;
+      });
+  }
+
+  function updateFanStatus() {
+    fetchNoStore('/fan_status')
+      .then(response => response.text())
+      .then(status => {
+        const icon = document.getElementById('fan-icon');
+        if (!icon) return;
+        if (status.trim() === 'on') icon.classList.add('fan-spinning');
+        else icon.classList.remove('fan-spinning');
+      })
+      .catch(() => {});
+  }
+
+  function updateCpuTemp() {
+    fetchNoStore('/cpu_temp')
+      .then(response => response.text())
+      .then(temp => setText('cpu-temp', temp.trim() || '--'))
+      .catch(() => setText('cpu-temp', '--'));
+  }
+
+  function updateLightStatus() {
+    fetchNoStore('/light_status')
+      .then(response => response.text())
+      .then(status => {
+        const led = document.getElementById('light-indicator');
+        if (led) led.className = 'led ' + (status.trim() === 'on' ? 'on' : 'off');
+      })
+      .catch(() => {});
+  }
+
+  function updateWifiStrength() {
+    fetchNoStore('/wifi_strength')
+      .then(response => response.json())
+      .then(data => {
+        setText('wifi-ssid', data.ssid || 'Unknown');
+        setText('wifi-percent', data.percent ?? '--');
+        setText('wifi-rssi', data.rssi ?? '--');
+      })
+      .catch(() => {
+        setText('wifi-ssid', 'Unknown');
+        setText('wifi-percent', '--');
+        setText('wifi-rssi', '--');
+      });
+  }
+	function updatePicoAge() {
+	  const ageEl = document.getElementById('pico-age');
+	  if (!ageEl) return;
+
+	  if (!picoLastSeen) {
+		ageEl.textContent = '--';
+		return;
+	  }
+
+	  const ageSec = Math.floor((Date.now() - picoLastSeen) / 1000);
+
+	  ageEl.textContent = 'Last Update: ' + ageSec + 's ago';
+	}
+function updateSystemStatus() {
+  fetchNoStore('/system_status')
+    .then(response => response.json())
+    .then(data => {
+
+      const pico = document.getElementById('pico-state');
+      const age  = document.getElementById('pico-age');
+
+      if (data.pico_online) {
+        pico.className = 'pill-value pico-online';
+        pico.textContent = 'ONLINE';
+      } else {
+        pico.className = 'pill-value pico-offline';
+        pico.textContent = 'OFFLINE';
+      }
+
+	age.textContent =
+	  data.last_update_sec <= 1
+		? 'Updated just now'
+		: 'Updated ' + data.last_update_sec + 's ago';
+    });
+}
+
+  (function showSavedBanner() {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('saved') !== '1') return;
+
+    const banner = document.getElementById('savedBanner');
+    const inline = document.getElementById('savedInline');
+
+    if (banner) {
+      banner.style.display = 'flex';
+      setTimeout(() => banner.classList.add('show'), 10);
+    }
+    if (inline) inline.style.display = 'inline-block';
+
+    setTimeout(() => {
+      if (banner) {
+        banner.classList.remove('show');
+        setTimeout(() => { banner.style.display = 'none'; }, 220);
+      }
+      if (inline) inline.style.display = 'none';
+
+      params.delete('saved');
+      const newUrl = window.location.pathname + (params.toString() ? '?' + params.toString() : '');
+      window.history.replaceState({}, '', newUrl);
+    }, 3000);
+  })();
+
+  document.querySelectorAll('.command-button[data-command]').forEach(button => {
+    button.addEventListener('click', () => {
+      const cmd = button.dataset.command;
+      if (cmd) sendCommand(cmd);
+    });
+  });
+
+  const autoVentButton = document.getElementById('autoVentButton');
+  if (autoVentButton) autoVentButton.addEventListener('click', toggleAutoVent);
+
+  document.getElementById('fan-test-button').addEventListener('click', testFan);
+  updateFanTestStatus();
+  setInterval(updateFanTestStatus, 1000);
+
+  updateVentStatus().then(updatePosition);
+  updateEnvironment();
+  updateFanStatus();
+  updateCpuTemp();
+  updateLightStatus();
+  updateWifiStrength();
+  updateSystemStatus();
+  updateAutoVentButton();
+
+  setInterval(() => updateVentStatus().then(updatePosition), 500);
+  setInterval(updateEnvironment, 5000);
+  setInterval(updateFanStatus, 5000);
+  setInterval(updateCpuTemp, 10000);
+  setInterval(updateLightStatus, 3000);
+  setInterval(updateWifiStrength, 10000);
+  setInterval(updateSystemStatus, 5000);
+  setInterval(updateAutoVentButton, 5000);
+  setInterval(updatePicoAge, 1000);
+</script>
+</body>
+</html>

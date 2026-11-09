@@ -1,0 +1,10 @@
+{
+  "garage_name": "Garage",
+  "min_distance": 11,
+  "max_distance": 108,
+  "vent_distance": 80,
+  "auto_close_enabled": false,
+  "auto_vent_enabled": false,
+  "second_door_enabled": false,
+  "wifi_roam_enabled": false
+}

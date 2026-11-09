@@ -1,0 +1,1904 @@
+# ------------------------------------------------------------
+# CRITICAL STARTUP: POWER THE PI ZERO BEFORE ANY OTHER IMPORTS
+# ------------------------------------------------------------
+# GP2 HIGH = Pi Zero power ON with the v9 AO3407A + 2N2222 circuit.
+# Do this first so an import/startup failure cannot leave the Pi unpowered.
+from machine import Pin
+PI_PWR_PIN = 2
+pi_pwr = Pin(PI_PWR_PIN, Pin.OUT, value=1)
+
+from machine import UART, I2C, ADC
+import machine
+import time
+import utime
+import ujson
+import os
+import ubinascii
+import BME280
+import adafruit_simplemath
+
+# Started after hardware initialization. Calls made before then are harmless.
+wdt = None
+
+
+def feed_watchdog():
+    try:
+        if wdt is not None:
+            wdt.feed()
+    except Exception:
+        pass
+
+# ----------------------------
+# Firmware version / UART updater
+# ----------------------------
+FW_VERSION = "1.0.26-COMBINED-VERIFIED"
+UPDATE_MODE = False
+_update_expected_size = 0
+_update_expected_checksum = ""
+_update_received_size = 0
+_update_checksum_sum = 0
+_update_seq_expected = 0
+UPDATE_NEW_FILE = "main.py.new"
+UPDATE_BAK_FILE = "main.py.bak"
+UPDATE_TARGET_FILE = "main.py"
+
+
+def update_checksum_bytes(data):
+    """Small checksum that works on MicroPython without extra libraries."""
+    total = 0
+    try:
+        for b in data:
+            total = (total + int(b)) & 0xFFFFFFFF
+    except Exception:
+        pass
+    return total
+
+
+def send_update_status(status, **extra):
+    try:
+        payload = {"update": status}
+        for k, v in extra.items():
+            payload[k] = v
+        uart.write(ujson.dumps(payload) + "\n")
+    except Exception:
+        pass
+
+
+def send_fw_version():
+    try:
+        uart.write(ujson.dumps({"fw_version": FW_VERSION}) + "\n")
+    except Exception:
+        pass
+
+
+def update_start(msg):
+    global UPDATE_MODE, _update_expected_size, _update_expected_checksum
+    global _update_received_size, _update_checksum_sum, _update_seq_expected
+    global abort_motion, pending_command, stop_command
+
+    try:
+        size = int(msg.get("size", 0))
+        checksum = str(msg.get("checksum", "")).strip().lower()
+        filename = str(msg.get("filename", UPDATE_TARGET_FILE)).strip()
+
+        if filename != UPDATE_TARGET_FILE or size <= 0 or not checksum:
+            send_update_status("failed", reason="bad_start")
+            return
+
+        # Put the controller in a safe state before receiving code.
+        UPDATE_MODE = True
+        abort_motion = True
+        pending_command = None
+        stop_command = False
+        MOTOR_MOVE.value(0)
+        LIGHT_ON_OFF.value(0)
+
+        try:
+            if UPDATE_NEW_FILE in os.listdir():
+                os.remove(UPDATE_NEW_FILE)
+        except Exception:
+            pass
+
+        with open(UPDATE_NEW_FILE, "wb") as f:
+            pass
+
+        _update_expected_size = size
+        _update_expected_checksum = checksum
+        _update_received_size = 0
+        _update_checksum_sum = 0
+        _update_seq_expected = 0
+        send_update_status("ready", size=size, version=FW_VERSION)
+    except Exception as e:
+        UPDATE_MODE = False
+        send_update_status("failed", reason="start_exception", detail=str(e))
+
+
+def update_chunk(msg):
+    global _update_received_size, _update_checksum_sum, _update_seq_expected
+
+    if not UPDATE_MODE:
+        send_update_status("failed", reason="not_in_update_mode")
+        return
+
+    try:
+        seq = int(msg.get("seq", -1))
+        if seq != _update_seq_expected:
+            send_update_status("failed", reason="bad_seq", expected=_update_seq_expected, got=seq)
+            return
+
+        data_b64 = msg.get("data", "")
+        chunk = ubinascii.a2b_base64(data_b64)
+        if not chunk:
+            send_update_status("failed", reason="empty_chunk", seq=seq)
+            return
+
+        with open(UPDATE_NEW_FILE, "ab") as f:
+            f.write(chunk)
+
+        _update_received_size += len(chunk)
+        _update_checksum_sum = (_update_checksum_sum + update_checksum_bytes(chunk)) & 0xFFFFFFFF
+        _update_seq_expected += 1
+        send_update_status("chunk_ok", seq=seq, received=_update_received_size)
+    except Exception as e:
+        send_update_status("failed", reason="chunk_exception", detail=str(e))
+
+
+def update_end(msg=None):
+    global UPDATE_MODE
+
+    if not UPDATE_MODE:
+        send_update_status("failed", reason="not_in_update_mode")
+        return
+
+    try:
+        actual_checksum = "%08x" % (_update_checksum_sum & 0xFFFFFFFF)
+
+        if _update_received_size != _update_expected_size:
+            UPDATE_MODE = False
+            send_update_status("failed", reason="size_mismatch", expected=_update_expected_size, got=_update_received_size)
+            return
+
+        if actual_checksum.lower() != _update_expected_checksum.lower():
+            UPDATE_MODE = False
+            send_update_status("failed", reason="checksum_mismatch", expected=_update_expected_checksum, got=actual_checksum)
+            return
+
+        try:
+            if UPDATE_BAK_FILE in os.listdir():
+                os.remove(UPDATE_BAK_FILE)
+        except Exception:
+            pass
+
+        try:
+            if UPDATE_TARGET_FILE in os.listdir():
+                os.rename(UPDATE_TARGET_FILE, UPDATE_BAK_FILE)
+        except Exception:
+            pass
+
+        os.rename(UPDATE_NEW_FILE, UPDATE_TARGET_FILE)
+        send_update_status("success", size=_update_received_size, checksum=actual_checksum)
+        time.sleep_ms(500)
+        machine.soft_reset()
+    except Exception as e:
+        UPDATE_MODE = False
+        send_update_status("failed", reason="end_exception", detail=str(e))
+
+
+def update_cancel(reason="cancelled"):
+    global UPDATE_MODE
+    UPDATE_MODE = False
+    try:
+        if UPDATE_NEW_FILE in os.listdir():
+            os.remove(UPDATE_NEW_FILE)
+    except Exception:
+        pass
+    send_update_status("cancelled", reason=reason)
+
+# ----------------------------
+# Garmin LIDAR-Lite v4 driver
+# ----------------------------
+# main_nonblocking_motor.py
+# ----------------------------
+class LidarLiteV4:
+    """
+    Garmin LIDAR-Lite v4 I2C driver for MicroPython.
+    Address: 0x62
+
+    Sequence:
+      1) Write 0x04 to reg 0x00 (acquire)
+      2) Poll reg 0x01 bit0 until 0 (not busy)
+      3) Read 2 bytes at 0x10
+    """
+    def __init__(self, i2c, addr=0x62):
+        self.i2c = i2c
+        self.addr = addr
+        self.i2c_error_count = 0
+        self._configured = False
+
+    def _write_reg(self, reg, val):
+        self.i2c.writeto_mem(self.addr, reg, bytes([val]))
+
+    def _read_u8(self, reg):
+        return self.i2c.readfrom_mem(self.addr, reg, 1)[0]
+
+    def _read_bytes(self, reg, n):
+        return self.i2c.readfrom_mem(self.addr, reg, n)
+
+    def configure_long_range(self):
+        """
+        Boost range by increasing acquisition effort/sensitivity.
+        Tune 0x04 and 0x1C if needed.
+        """
+        try:
+            self._write_reg(0x02, 0x80)  # baseline
+            self._write_reg(0x04, 0x08)  # acquisition count
+            self._write_reg(0x1C, 0x00)  # sensitivity
+            self._configured = True
+        except Exception:
+            self.i2c_error_count += 1
+            self._configured = False
+
+    def read_cm(self, retries=5, settle_ms=8, busy_timeout_ms=200, debug=False):
+        """
+        Returns distance in centimeters, or None on failure.
+        More forgiving timing helps prevent every-other-read failures.
+        """
+        if not self._configured:
+            self.configure_long_range()
+            time.sleep_ms(50)
+
+        for _ in range(retries):
+            feed_watchdog()
+            try:
+                # Trigger measurement
+                self._write_reg(0x00, 0x04)
+
+                # Wait until not busy (status reg 0x01 bit0 clears)
+                t0 = time.ticks_ms()
+                while True:
+                    feed_watchdog()
+                    status = self._read_u8(0x01)
+                    if (status & 0x01) == 0:
+                        break
+                    if time.ticks_diff(time.ticks_ms(), t0) > busy_timeout_ms:
+                        raise OSError("LIDAR busy timeout")
+                    time.sleep_ms(settle_ms)
+
+                # Small settle after busy clears
+                if settle_ms > 0:
+                    time.sleep_ms(settle_ms)
+
+                # Read two bytes at 0x10
+                b = self._read_bytes(0x10, 2)
+                b0, b1 = b[0], b[1]
+
+                # Try both byte orders
+                cm_a = (b0 << 8) | b1
+                cm_b = (b1 << 8) | b0
+
+                if debug:
+                    print("status:", status, "raw:", b0, b1, "cm_a:", cm_a, "cm_b:", cm_b)
+
+                if 5 <= cm_a <= 1000:
+                    return cm_a
+                if 5 <= cm_b <= 1000:
+                    return cm_b
+
+            except Exception as e:
+                self.i2c_error_count += 1
+                if debug:
+                    print("LIDAR err:", e)
+                time.sleep_ms(10)
+
+        return None
+
+
+# ----------------------------
+# Pins
+# ----------------------------
+LIGHT_PIN = 10
+OPEN_PIN = 11
+CLOSE_PIN = 12
+VENT_PIN = 13
+STOP_PIN = 14
+
+LIGHT_ON_OFF = Pin(22, Pin.OUT)
+LIGHT_ON_OFF.value(0)
+
+MOTOR_MOVE = Pin(18, Pin.OUT)
+MOTOR_MOVE.value(0)
+
+# Relay pulse timing.
+# This is now non-blocking, so the Pico can keep reading UART/LIDAR while the button is held.
+button_hold_time = 1.0
+button_hold_ms = int(button_hold_time * 1000)
+
+DEBOUNCE_MS = 200
+
+_motor_pulse_active = False
+_motor_pulse_until_ms = 0
+
+_light_pulse_active = False
+_light_pulse_until_ms = 0
+
+
+# ----------------------------
+# Watchdog tuning (single source of truth)
+# ----------------------------
+# Heartbeat-only reset: Pi must miss HB long enough N times in a row.
+HB_TIMEOUT_MS = 15000           # count a "miss" if hb age > 15s
+HB_MISSES_TO_RESET = 8          # ~2 minutes of continuous misses triggers reset
+
+# Net is status-only (DO NOT reset from net)
+NET_TIMEOUT_MS = 180000         # used only for diagnostics/logging
+
+hb_miss_count = 0
+
+
+# ----------------------------
+# PI POWER CONTROL (AO3407A + 2N2222)
+# ----------------------------
+# PI_PWR_PIN and pi_pwr are intentionally initialized at the very top of
+# main.py so the Pi Zero receives power before any other module can fail.
+# Do NOT reinitialize GP2 here.
+
+PI_BOOT_GRACE_MS = 180000       # ignore watchdog checks for 3 minutes after power on
+PI_RESET_COOLDOWN_MS = 300000   # don't reset again within 5 minutes
+PI_POWER_OFF_MS = 2500          # cut power for 2.5s
+
+_last_hb_ms = utime.ticks_ms()
+_last_net_ms = utime.ticks_ms()
+_last_pi_power_on_ms = utime.ticks_ms()
+_last_pi_reset_ms = 0
+
+
+# ----------------------------
+# Control flags
+# ----------------------------
+stop_command = False
+abort_motion = False
+pending_command = None
+active_motion_command = None
+vent_status = 0
+
+
+# ----------------------------
+# UART and I2C (shared bus)
+# ----------------------------
+uart = UART(0, baudrate=115200, tx=Pin(0), rx=Pin(1), rxbuf=8192)
+
+# Buffered UART receive prevents partial JSON lines during firmware updates.
+_uart_rx_buffer = b""
+MAX_UART_BUFFER = 16384
+
+# Conservative UART self-recovery. Recovery never runs merely because the Pi
+# is quiet, and partial-line cleanup is disabled during firmware updates.
+UART_PARTIAL_LINE_TIMEOUT_MS = 5000
+UART_RECOVERY_COOLDOWN_MS = 5000
+_uart_partial_since_ms = None
+_uart_last_recovery_ms = 0
+_uart_error_count = 0
+_uart_recovery_count = 0
+
+# I2C pins (RP2040)
+I2C_ID = 0
+SCL_PIN_NUM = 9
+SDA_PIN_NUM = 8
+I2C_FREQ = 100000
+
+i2c = I2C(I2C_ID, scl=Pin(SCL_PIN_NUM), sda=Pin(SDA_PIN_NUM), freq=I2C_FREQ)
+
+
+# ----------------------------
+# Debug helper (USB console + UART)
+# ----------------------------
+def dbg(msg):
+    try:
+        print("[DBG]", msg)
+    except:
+        pass
+    try:
+        uart.write(ujson.dumps({"dbg": msg}) + "\n")
+    except:
+        pass
+
+
+def send_event(event):
+    """Send event messages to the Pi Zero for logging in serial_reader.py."""
+    try:
+        uart.write(ujson.dumps({
+            "event": event,
+            "ms": utime.ticks_ms()
+        }) + "\n")
+    except:
+        pass
+
+
+# Let the Pi side serial reader start, then announce Pico boot.
+time.sleep_ms(500)
+send_event("pico_boot")
+
+
+# ----------------------------
+# Ignore boot glitches
+# ----------------------------
+BOOT_IGNORE_MS = 4000
+_boot_ms = utime.ticks_ms()
+
+
+def stable_low(pin, ms=40):
+    t0 = utime.ticks_ms()
+    while utime.ticks_diff(utime.ticks_ms(), t0) < ms:
+        if pin.value() != 0:
+            return False
+        time.sleep_ms(2)
+    return True
+
+
+# ----------------------------
+# LIDAR Health / Recovery Settings
+# ----------------------------
+LIDAR_STALE_MS = 1500
+LIDAR_RECOVER_COOLDOWN_MS = 800
+LIDAR_MAX_RECOVERS = 4
+
+_last_lidar_good_ms = utime.ticks_ms()
+_last_lidar_value_in = None
+_lidar_recover_attempts = 0
+_last_recover_ms = 0
+
+
+# ----------------------------
+# I2C bus clear helper (for stuck SDA/SCL)
+# ----------------------------
+def i2c_bus_clear(scl_pin_num=SCL_PIN_NUM, sda_pin_num=SDA_PIN_NUM, pulses=9):
+    try:
+        scl = Pin(scl_pin_num, Pin.OUT)
+        sda = Pin(sda_pin_num, Pin.IN, Pin.PULL_UP)
+
+        scl.value(1)
+        time.sleep_us(5)
+
+        for _ in range(pulses):
+            scl.value(0)
+            time.sleep_us(5)
+            scl.value(1)
+            time.sleep_us(5)
+
+        # STOP: SDA low then high while SCL high
+        sda = Pin(sda_pin_num, Pin.OUT)
+        sda.value(0)
+        time.sleep_us(5)
+        scl.value(1)
+        time.sleep_us(5)
+        sda = Pin(sda_pin_num, Pin.IN, Pin.PULL_UP)
+        time.sleep_us(5)
+
+        return True
+    except Exception as e:
+        dbg("i2c_bus_clear err: " + str(e))
+        return False
+
+
+def rebuild_i2c_and_lidar():
+    global i2c, lidar
+    try:
+        try:
+            i2c.deinit()
+        except:
+            pass
+
+        time.sleep_ms(50)
+        i2c_bus_clear()
+
+        time.sleep_ms(50)
+        i2c = I2C(I2C_ID, scl=Pin(SCL_PIN_NUM), sda=Pin(SDA_PIN_NUM), freq=I2C_FREQ)
+        lidar = LidarLiteV4(i2c=i2c, addr=0x62)
+        lidar.configure_long_range()
+        time.sleep_ms(100)
+        return True
+    except Exception as e:
+        dbg("rebuild_i2c_and_lidar err: " + str(e))
+        return False
+
+
+def lidar_health_check():
+    """
+    Recovery-only watchdog (NO Pico self-reset).
+    Also skips recovery during PI boot grace to avoid chasing noise during Pi power cycling.
+    """
+    global _lidar_recover_attempts, _last_recover_ms
+
+    now = utime.ticks_ms()
+
+    # Skip any LIDAR recovery while the Pi is in its boot grace period
+    if utime.ticks_diff(now, _last_pi_power_on_ms) < PI_BOOT_GRACE_MS:
+        return
+
+    stale = utime.ticks_diff(now, _last_lidar_good_ms)
+
+    if stale < LIDAR_STALE_MS:
+        _lidar_recover_attempts = 0
+        return
+
+    if utime.ticks_diff(now, _last_recover_ms) < LIDAR_RECOVER_COOLDOWN_MS:
+        return
+
+    _last_recover_ms = now
+    _lidar_recover_attempts += 1
+    dbg("LIDAR stale " + str(stale) + "ms -> recover attempt " + str(_lidar_recover_attempts))
+
+    # 1) light touch
+    try:
+        lidar.configure_long_range()
+    except:
+        pass
+
+    # 2) heavier touch
+    if _lidar_recover_attempts >= 2:
+        rebuild_i2c_and_lidar()
+
+    # 3) keep trying rebuilds, but NEVER reset the Pico
+    if _lidar_recover_attempts >= LIDAR_MAX_RECOVERS:
+        dbg("LIDAR still stale; continuing rebuild attempts (no Pico reset)")
+        _lidar_recover_attempts = 0
+
+
+# ----------------------------
+# Garmin LIDAR-Lite v4 init
+# ----------------------------
+lidar = LidarLiteV4(i2c=i2c, addr=0x62)
+lidar.configure_long_range()
+
+# Give the LIDAR time to settle after configuration.
+time.sleep_ms(1000)
+
+# Test LIDAR 5 times on startup.
+for i in range(5):
+    cm = lidar.read_cm(retries=5, settle_ms=8, busy_timeout_ms=200)
+    print("LIDAR cm:", cm)
+    time.sleep_ms(500)
+
+
+# ----------------------------
+# BME280 + light sensor
+# ----------------------------
+scan = i2c.scan()
+bme_addr = 0x77 if 0x77 in scan else (0x76 if 0x76 in scan else None)
+
+if bme_addr is None:
+    bme = None
+    print("BME280 not found on I2C scan:", [hex(x) for x in scan])
+else:
+    bme = BME280.BME280(i2c=i2c, addr=bme_addr)
+    print("BME280 found at", hex(bme_addr))
+
+light_sensor = ADC(0)  # GP26
+
+
+# ----------------------------
+# Distance thresholds (inches)
+# ----------------------------
+DOOR_CLOSED_IN = 108
+DOOR_OPEN_IN = 11
+DOOR_VENT_IN = 75
+
+# Clear a remembered vent state once the measured door position moves away
+# from the configured vent location. This also handles movement from a vehicle
+# remote, where the Pico never receives an OPEN or CLOSE command.
+VENT_STATUS_ENTER_DEADBAND_IN = 3.0
+# Initial compensation from Truck captures; validate against physical stops.
+VENT_STOP_LEAD_CLOSING_IN = 4.0
+VENT_STOP_LEAD_OPENING_IN = 3.0
+VENT_SETTLE_MS = 700
+VENT_SETTLE_RANGE_IN = 1.5
+_vent_recent_samples = []
+_position_fresh = False
+VENT_STATUS_EXIT_DEADBAND_IN = 4.0
+
+LIGHT_LEVEL_ON = 30000
+MAX_TIMEOUT = 30
+
+
+# ----------------------------
+# Globals
+# ----------------------------
+_last_good_distance_in = None
+mapped = 0.0
+
+# LIDAR sanity filter. The physical door target should remain close to the
+# configured open/closed range. Readings outside this envelope are discarded.
+LIDAR_MIN_VALID_IN = 5.0
+LIDAR_MAX_VALID_IN = 140.0
+
+# A single reading cannot legitimately jump this far between samples. Large
+# changes must repeat closely before they are accepted, allowing genuine door
+# movement/reacquisition while rejecting isolated values such as 202 inches.
+LIDAR_MAX_SINGLE_JUMP_IN = 18.0
+LIDAR_JUMP_CONFIRM_TOLERANCE_IN = 4.0
+LIDAR_JUMP_CONFIRM_COUNT = 3
+_lidar_jump_candidate_in = None
+_lidar_jump_candidate_count = 0
+
+LOOP_SLEEP_S = 0.05
+
+# Environmental period: 60 seconds
+ENV_PERIOD_S = 60.0
+_last_env_ts_ms = 0
+
+
+# ----------------------------
+# Debounce / actions
+# ----------------------------
+# Phase 1 passive diagnostics. Install this file as main.py after backing up
+# the installed main.py. Hardware, pin assignments and control decisions match
+# 1.0.21-CRITICAL-STARTUP. No additional LIDAR reads or control delays are added.
+# Capture USB console output with Thonny; records start with GARAGE_DIAG.
+# UART receives the same record in the existing {"dbg": "..."} envelope.
+# Pi logging of dbg messages must be verified before relying on unattended logs.
+# Do not open a second reader on the Pi UART while its existing reader is running.
+# Test OPEN -> VENT -> CLOSE and OPEN -> VENT -> OPEN with someone present.
+# Include wall/remote movements and a reset while stationary at VENT.
+# Manual movement has sample records but no pulse records (not wired to Pico).
+# Sampling uses existing calls, so the initial 500 ms wait can have no samples.
+# All timing is monotonic Pico ms, wrapping at the MicroPython ticks period.
+# Diagnostics are buffered and emitted only when the motor relay is inactive.
+# Raw and accepted samples are limited to 100 ms near commands/pulses and
+# during idle monitoring; long VENT moves use 500 ms after the first 3 seconds.
+# Queue overflow drops new records and emits a dropped count; it never blocks.
+# These diagnostics add execution overhead and still require physical testing.
+DIAG_ENABLED = False
+_DIAG_CAPACITY = 128
+_diag_queue = [None] * _DIAG_CAPACITY
+_diag_head = 0
+_diag_count = 0
+_diag_dropped = 0
+_diag_sequence = 0
+_diag_session = 0
+_diag_action = None
+_diag_until_ms = None
+_diag_last_raw_ms = None
+_diag_last_result_ms = None
+
+
+def set_diagnostics_enabled(enabled):
+    global DIAG_ENABLED, _diag_head, _diag_count, _diag_dropped
+    global _diag_action, _diag_until_ms, _diag_last_raw_ms, _diag_last_result_ms
+    if not isinstance(enabled, bool):
+        return
+    if enabled != DIAG_ENABLED:
+        # Discard old queued samples when changing mode; never replay an old
+        # capture on re-enable. Door-control state is untouched.
+        for i in range(_DIAG_CAPACITY):
+            _diag_queue[i] = None
+        _diag_head = 0
+        _diag_count = 0
+        _diag_dropped = 0
+        _diag_action = None
+        _diag_until_ms = None
+        _diag_last_raw_ms = None
+        _diag_last_result_ms = None
+        DIAG_ENABLED = enabled
+    try:
+        uart.write(ujson.dumps({"diagnostics_enabled": DIAG_ENABLED}) + "\n")
+    except Exception:
+        pass
+
+
+def diag_record(kind, value=None):
+    global _diag_count, _diag_dropped, _diag_sequence
+    if not DIAG_ENABLED:
+        return
+    try:
+        _diag_sequence += 1
+        if (kind in ("raw_cm", "accepted_in", "jump_cached_in",
+                     "read_failed_cached_in", "read_failed_no_cache") and
+                _diag_count >= _DIAG_CAPACITY - 16):
+            _diag_dropped += 1
+            return
+        if _diag_count >= _DIAG_CAPACITY:
+            _diag_dropped += 1
+            return
+        index = (_diag_head + _diag_count) % _DIAG_CAPACITY
+        _diag_queue[index] = (utime.ticks_ms(), _diag_sequence,
+                              _diag_session, _diag_action, kind, value)
+        _diag_count += 1
+    except Exception:
+        pass
+
+
+def diag_begin(action):
+    global _diag_session, _diag_action, _diag_until_ms
+    if not DIAG_ENABLED:
+        return
+    _diag_session += 1
+    _diag_action = action
+    _diag_until_ms = utime.ticks_add(utime.ticks_ms(), 3000)
+    diag_record("command_begin", (DOOR_OPEN_IN, DOOR_VENT_IN, DOOR_CLOSED_IN))
+
+
+def diag_end():
+    global _diag_action, _diag_until_ms
+    if not DIAG_ENABLED:
+        return
+    diag_record("command_return", bool(abort_motion))
+    _diag_action = None
+    _diag_until_ms = utime.ticks_add(utime.ticks_ms(), 3000)
+
+
+def diag_pulse(kind, force=False):
+    global _diag_until_ms
+    if not DIAG_ENABLED:
+        return
+    _diag_until_ms = utime.ticks_add(utime.ticks_ms(), 3000)
+    diag_record(kind, bool(force))
+
+
+def diag_raw(distance_cm):
+    global _diag_last_raw_ms
+    if not DIAG_ENABLED:
+        return
+    now = utime.ticks_ms()
+    burst = (_diag_until_ms is not None and
+             utime.ticks_diff(_diag_until_ms, now) >= 0)
+    interval = 500 if _diag_action is not None and not burst else 100
+    if (_diag_last_raw_ms is None or
+            utime.ticks_diff(now, _diag_last_raw_ms) >= interval):
+        _diag_last_raw_ms = now
+        diag_record("raw_cm", distance_cm)
+
+
+def diag_result(kind, value=None):
+    global _diag_last_result_ms
+    if not DIAG_ENABLED:
+        return
+    now = utime.ticks_ms()
+    burst = (_diag_until_ms is not None and
+             utime.ticks_diff(_diag_until_ms, now) >= 0)
+    interval = 500 if _diag_action is not None and not burst else 100
+    if (_diag_last_result_ms is None or
+            utime.ticks_diff(now, _diag_last_result_ms) >= interval):
+        _diag_last_result_ms = now
+        diag_record(kind, value)
+
+
+def diag_flush():
+    global _diag_head, _diag_count, _diag_dropped
+    # No print/UART diagnostic output while a relay is held or while start_move
+    # is executing. Up to four records per idle loop bounds output overhead.
+    if not DIAG_ENABLED or _motor_pulse_active or _light_pulse_active or UPDATE_MODE:
+        return
+    try:
+        for _ in range(min(4, _diag_count)):
+            record = _diag_queue[_diag_head]
+            msg = "GARAGE_DIAG " + ujson.dumps(record)
+            print(msg)
+            uart.write(ujson.dumps({"dbg": msg}) + "\n")
+            _diag_queue[_diag_head] = None
+            _diag_head = (_diag_head + 1) % _DIAG_CAPACITY
+            _diag_count -= 1
+        if _diag_dropped and _diag_count == 0:
+            msg = "GARAGE_DIAG " + ujson.dumps({"dropped": _diag_dropped,
+                                                "ms": utime.ticks_ms()})
+            print(msg)
+            uart.write(ujson.dumps({"dbg": msg}) + "\n")
+            _diag_dropped = 0
+    except Exception:
+        # Transport failures must not propagate into door control.
+        pass
+
+
+def service_pulses():
+    """
+    Turns relay outputs off when their non-blocking hold time has expired.
+    Call this often from loops and the main loop.
+    """
+    global _motor_pulse_active, _light_pulse_active
+
+    now = utime.ticks_ms()
+
+    if _motor_pulse_active and utime.ticks_diff(now, _motor_pulse_until_ms) >= 0:
+        MOTOR_MOVE.value(0)
+        _motor_pulse_active = False
+        diag_pulse("pulse_end")
+
+    if _light_pulse_active and utime.ticks_diff(now, _light_pulse_until_ms) >= 0:
+        LIGHT_ON_OFF.value(0)
+        _light_pulse_active = False
+
+
+def motor_pulse(force=False):
+    """
+    Starts a garage button pulse without blocking.
+    force=True allows STOP to pulse even when abort_motion is set.
+    """
+    global _motor_pulse_active, _motor_pulse_until_ms
+
+    if abort_motion and not force:
+        return False
+
+    MOTOR_MOVE.value(1)
+    _motor_pulse_active = True
+    _motor_pulse_until_ms = utime.ticks_add(utime.ticks_ms(), button_hold_ms)
+    diag_pulse("pulse_start", force)
+    return True
+
+
+def light_pulse():
+    """
+    Starts a light button pulse without blocking.
+    """
+    global _light_pulse_active, _light_pulse_until_ms
+
+    LIGHT_ON_OFF.value(1)
+    _light_pulse_active = True
+    _light_pulse_until_ms = utime.ticks_add(utime.ticks_ms(), button_hold_ms)
+    return True
+
+
+def wait_ms_with_service(ms):
+    """
+    Delay helper that keeps UART, relay timers, and STOP responsive.
+    """
+    end_ms = utime.ticks_add(utime.ticks_ms(), ms)
+    while utime.ticks_diff(end_ms, utime.ticks_ms()) > 0:
+        feed_watchdog()
+        service_pulses()
+        check_uart()
+        service_button_events()
+        if abort_motion:
+            break
+        time.sleep_ms(10)
+
+
+def wait_pulse_done_with_service():
+    """
+    Wait until the motor pulse finishes while keeping UART/STOP responsive.
+    """
+    while _motor_pulse_active:
+        feed_watchdog()
+        service_pulses()
+        check_uart()
+        service_button_events()
+        if abort_motion:
+            break
+        time.sleep_ms(10)
+
+
+def pulse_motor_for_stop():
+    """
+    STOP uses the same wall-button/motor trigger line.
+    Non-blocking pulse is forced even if abort_motion is already true.
+    """
+    motor_pulse(force=True)
+
+
+def stop_start_trigger():
+    # Deliberately retained as a harmless compatibility stub.
+    send_event("wall_stop_ignored")
+
+
+def enqueue_command(cmd):
+    global pending_command, abort_motion
+
+    if utime.ticks_diff(utime.ticks_ms(), _boot_ms) < BOOT_IGNORE_MS:
+        return
+
+    send_event("wall_" + cmd)
+    abort_motion = False
+    pending_command = cmd
+
+
+def light_turn_on_off():
+    send_event("wall_light")
+    light_pulse()
+
+
+def safe_motor(wait_for_done=True):
+    """
+    Start a non-blocking motor pulse.
+    By default this waits only for the pulse to finish while still servicing UART/LIDAR-safe tasks.
+    """
+    if not motor_pulse(force=False):
+        return False
+
+    if wait_for_done:
+        wait_pulse_done_with_service()
+
+    return True
+
+
+# ----------------------------
+# UART send helpers
+# ----------------------------
+def send_position(mapped_pos, actual_distance):
+    """
+    FAST: sent every position update, includes light info for HTML bulb.
+    """
+    try:
+        light_value = light_sensor.read_u16()
+        light_detected = 'on' if light_value >= LIGHT_LEVEL_ON else 'off'
+
+        data = ujson.dumps({
+            'position_percent': round(mapped_pos, 1),
+            'position_in': round(actual_distance, 1),
+            'light': light_detected,
+            'light_value': int(light_value),
+        })
+        uart.write(data + '\n')
+    except:
+        pass
+
+
+def send_vent_status(vent):
+    try:
+        data = ujson.dumps({'vent_status': vent})
+        uart.write(data + '\n')
+    except:
+        pass
+
+
+def _as_float_strip_units(x):
+    # Accepts numbers or strings like "24.3C" or "51.2%"
+    s = str(x).strip()
+    s = s.replace("C", "").replace("c", "").replace("%", "")
+    return float(s)
+
+
+def send_environmental_data():
+    """
+    SLOW: sent once per minute, temp/humidity only (no light here).
+    """
+    if bme is None:
+        return
+    try:
+        temp_c = _as_float_strip_units(bme.temperature)
+        temp_f = (temp_c * 9 / 5) + 32
+
+        humidity = _as_float_strip_units(bme.humidity)
+        humidity_int = int(humidity)
+
+        data = ujson.dumps({
+            'temperature_f': round(temp_f, 1),
+            'humidity': humidity_int
+        })
+        uart.write(data + '\n')
+    except:
+        pass
+
+
+# ----------------------------
+# Position read (returns last good instead of None)
+# ----------------------------
+def update_settled_vent_status(distance_in):
+    global _vent_recent_samples, vent_status
+    now = utime.ticks_ms()
+    _vent_recent_samples.append((now, distance_in))
+    _vent_recent_samples = [(t, v) for t, v in _vent_recent_samples
+                            if utime.ticks_diff(now, t) <= 1500][-16:]
+    values = [v for _, v in _vent_recent_samples]
+    span = utime.ticks_diff(now, _vent_recent_samples[0][0])
+    settled = (len(values) >= 4 and span >= VENT_SETTLE_MS
+               and max(values) - min(values) <= VENT_SETTLE_RANGE_IN)
+    error = abs(distance_in - DOOR_VENT_IN)
+    moving = (len(values) >= 4 and span >= 300 and
+              abs(values[-1] - values[0]) >= 2.0)
+    if vent_status == 0 and settled and error <= VENT_STATUS_ENTER_DEADBAND_IN:
+        vent_status = 1
+        send_vent_status(1)
+    elif vent_status == 1 and (moving or error > VENT_STATUS_EXIT_DEADBAND_IN):
+        vent_status = 0
+        send_vent_status(0)
+    return settled
+
+
+def confirm_vent_stop():
+    # Do not declare success just because a STOP pulse was sent. Collect fresh
+    # readings after it and let settled-position logic drive the status.
+    global _vent_recent_samples, vent_status
+    _vent_recent_samples = []
+    started = utime.ticks_ms()
+    while utime.ticks_diff(utime.ticks_ms(), started) < 3500 and not abort_motion:
+        feed_watchdog()
+        service_pulses()
+        check_uart()
+        service_button_events()
+        if abort_motion or UPDATE_MODE:
+            return False
+        p = get_position(sample_count=1, delay=0.001, settle_ms=5)
+        if _position_fresh and p is not None:
+            values = [v for _, v in _vent_recent_samples]
+            if (len(values) >= 4 and
+                    utime.ticks_diff(_vent_recent_samples[-1][0], _vent_recent_samples[0][0]) >= VENT_SETTLE_MS and
+                    max(values) - min(values) <= VENT_SETTLE_RANGE_IN):
+                good = abs(p - DOOR_VENT_IN) <= VENT_STATUS_ENTER_DEADBAND_IN
+                diag_record("vent_settled_in", p)
+                if not good:
+                    vent_status = 0
+                    send_vent_status(0)
+                    send_event("vent_stopped_outside_tolerance")
+                return good
+        wait_ms_with_service(80)
+    send_event("vent_settle_unconfirmed")
+    return False
+
+
+def get_position(sample_count=3, delay=0.001, settle_ms=8):
+    global mapped, _last_good_distance_in, vent_status, _position_fresh
+    _position_fresh = False
+    global _last_lidar_good_ms, _last_lidar_value_in
+    global _lidar_jump_candidate_in, _lidar_jump_candidate_count
+
+    valid_readings = []
+    for _ in range(sample_count):
+        distance_cm = lidar.read_cm(retries=5, settle_ms=settle_ms, busy_timeout_ms=200)
+        diag_raw(distance_cm)
+        if distance_cm is None:
+            time.sleep(delay)
+            continue
+
+        distance_in = distance_cm / 2.54
+
+        # Reject impossible garage-door measurements before averaging. This
+        # blocks the repeatable bogus ~202-inch reading from reaching motion,
+        # vent, UART, or HTML position logic.
+        if LIDAR_MIN_VALID_IN <= distance_in <= LIDAR_MAX_VALID_IN:
+            valid_readings.append(distance_in)
+
+        time.sleep(delay)
+
+    if valid_readings:
+        # Median is more resistant than an average to one bad sample.
+        valid_readings.sort()
+        count = len(valid_readings)
+        if count & 1:
+            measured_in = valid_readings[count // 2]
+        else:
+            measured_in = (valid_readings[(count // 2) - 1] + valid_readings[count // 2]) / 2.0
+
+        accepted_in = measured_in
+
+        if _last_good_distance_in is not None:
+            jump = abs(measured_in - _last_good_distance_in)
+
+            if jump > LIDAR_MAX_SINGLE_JUMP_IN:
+                # Do not accept a large discontinuity until several successive
+                # calls report approximately the same new distance.
+                if (_lidar_jump_candidate_in is not None and
+                        abs(measured_in - _lidar_jump_candidate_in) <= LIDAR_JUMP_CONFIRM_TOLERANCE_IN):
+                    _lidar_jump_candidate_count += 1
+                    _lidar_jump_candidate_in = (
+                        (_lidar_jump_candidate_in * (_lidar_jump_candidate_count - 1)) + measured_in
+                    ) / _lidar_jump_candidate_count
+                else:
+                    _lidar_jump_candidate_in = measured_in
+                    _lidar_jump_candidate_count = 1
+
+                if _lidar_jump_candidate_count < LIDAR_JUMP_CONFIRM_COUNT:
+                    diag_result("jump_cached_in", (measured_in, _last_good_distance_in))
+                    return _last_good_distance_in
+
+                accepted_in = _lidar_jump_candidate_in
+                _lidar_jump_candidate_in = None
+                _lidar_jump_candidate_count = 0
+            else:
+                _lidar_jump_candidate_in = None
+                _lidar_jump_candidate_count = 0
+
+        m = adafruit_simplemath.map_range(accepted_in, DOOR_OPEN_IN, DOOR_CLOSED_IN, 0, 100)
+        if m < 0:
+            m = 0.0
+        elif m > 100:
+            m = 100.0
+
+        mapped = float(m)
+        _last_good_distance_in = float(accepted_in)
+
+        _position_fresh = True
+        _last_lidar_good_ms = utime.ticks_ms()
+        _last_lidar_value_in = float(accepted_in)
+
+        diag_result("accepted_in", accepted_in)
+        send_position(mapped, accepted_in)
+
+        # Determine VENTED from the confirmed LIDAR distance, regardless of
+        # whether the door was moved by the app, wall control, or vehicle remote.
+        # A tighter enter window and wider exit window provide hysteresis so
+        # normal 1-inch LIDAR variation does not make the status flicker.
+        update_settled_vent_status(accepted_in)
+
+        return accepted_in
+
+    if _last_good_distance_in is not None:
+        diag_result("read_failed_cached_in", _last_good_distance_in)
+        return _last_good_distance_in
+
+    diag_result("read_failed_no_cache")
+    return None
+
+
+# ----------------------------
+# UART command handling
+# ----------------------------
+def handle_command(cmd):
+    """
+    Handles commands from the Pi Zero/web app.
+    Accepts: open, close, vent, light.
+    STOP is intentionally ignored because the opener uses the same toggle
+    line for START and STOP. A false STOP while stationary can open the door.
+    """
+    global stop_command, abort_motion, pending_command
+
+    if cmd is None:
+        return
+
+    try:
+        cmd = str(cmd).strip().lower()
+    except:
+        return
+
+    if cmd == "":
+        return
+
+    if UPDATE_MODE:
+        send_update_status("busy", reason="update_mode")
+        return
+
+    if cmd == "stop":
+        send_event("app_stop_ignored")
+        return
+
+    elif cmd in ("open", "close", "vent"):
+        if cmd == active_motion_command:
+            return
+        send_event("app_" + cmd)
+        abort_motion = False
+        pending_command = cmd
+
+    elif cmd == "light":
+        send_event("app_light")
+        light_turn_on_off()
+
+
+# ----------------------------
+# UART config + heartbeat updates from Pi Zero
+# ----------------------------
+_settings_ready = False
+
+
+def send_settings_ack(token=None, ok=True, error=None):
+    payload = {"settings_ack": {"vent_distance": DOOR_VENT_IN,
+               "min_distance": DOOR_OPEN_IN, "max_distance": DOOR_CLOSED_IN,
+               "light_level_on": LIGHT_LEVEL_ON},
+               "settings_token": token, "settings_ok": ok,
+               "settings_ready": _settings_ready}
+    if error:
+        payload["settings_error"] = error
+    try:
+        uart.write(ujson.dumps(payload) + "\n")
+    except Exception:
+        pass
+
+
+def apply_confirmed_settings(values, token=None):
+    global DOOR_VENT_IN, DOOR_OPEN_IN, DOOR_CLOSED_IN, LIGHT_LEVEL_ON
+    global _settings_ready, vent_status
+    keys = ("vent_distance", "min_distance", "max_distance", "light_level_on")
+    try:
+        if not isinstance(values, dict) or any(k not in values for k in keys):
+            raise ValueError("all four settings are required")
+        if any(isinstance(values[k], bool) or not isinstance(values[k], (int, float)) for k in keys):
+            raise ValueError("settings must be numbers")
+        candidate = {k: int(values[k]) for k in keys}
+        if any(candidate[k] != values[k] for k in keys):
+            raise ValueError("settings must be whole numbers")
+        if not (0 < candidate["min_distance"] < candidate["vent_distance"] < candidate["max_distance"]):
+            raise ValueError("distances must satisfy open < vent < closed")
+        if not 0 <= candidate["light_level_on"] <= 65535:
+            raise ValueError("light threshold is outside ADC range")
+        changed = (DOOR_VENT_IN != candidate["vent_distance"] or
+                   DOOR_OPEN_IN != candidate["min_distance"] or
+                   DOOR_CLOSED_IN != candidate["max_distance"])
+        # Validate the complete candidate first, then apply as one operation.
+        DOOR_VENT_IN = candidate["vent_distance"]
+        DOOR_OPEN_IN = candidate["min_distance"]
+        DOOR_CLOSED_IN = candidate["max_distance"]
+        LIGHT_LEVEL_ON = candidate["light_level_on"]
+        _settings_ready = True
+        if changed:
+            vent_status = 0
+            send_vent_status(0)
+        send_settings_ack(token)
+    except Exception as exc:
+        send_settings_ack(token, False, str(exc))
+
+
+def _process_uart_line(line_str):
+    global DOOR_VENT_IN, DOOR_OPEN_IN, DOOR_CLOSED_IN, LIGHT_LEVEL_ON
+    global _last_hb_ms, _last_net_ms
+
+    if not line_str:
+        return
+
+    # First try JSON.
+    try:
+        msg = ujson.loads(line_str)
+
+        # Firmware/version/update commands MUST be handled before the normal
+        # UPDATE_MODE blocking logic, or chunks get rejected as "busy".
+        if 'cmd' in msg:
+            raw_cmd = str(msg.get('cmd', '')).strip().lower()
+            if raw_cmd == 'settings_get':
+                send_settings_ack(msg.get('settings_token'))
+                return
+            elif raw_cmd == 'fw_version':
+                send_fw_version()
+                return
+            elif raw_cmd == 'update_start':
+                update_start(msg)
+                return
+            elif raw_cmd == 'update_chunk':
+                update_chunk(msg)
+                return
+            elif raw_cmd == 'update_end':
+                update_end(msg)
+                return
+            elif raw_cmd == 'update_cancel':
+                update_cancel("zero_cancel")
+                return
+
+        # During update mode, only update commands and heartbeat/net are allowed.
+        if UPDATE_MODE:
+            if 'hb' in msg:
+                _last_hb_ms = utime.ticks_ms()
+            if 'net' in msg:
+                _last_net_ms = utime.ticks_ms()
+            return
+
+        if 'settings_apply' in msg:
+            apply_confirmed_settings(msg['settings_apply'], msg.get('settings_token'))
+            return
+
+        if 'diagnostics_enabled' in msg:
+            set_diagnostics_enabled(msg['diagnostics_enabled'])
+            return
+
+        # Heartbeat: {"hb":1}
+        if 'hb' in msg:
+            _last_hb_ms = utime.ticks_ms()
+
+        # Network OK: {"net":1}  (status-only)
+        if 'net' in msg:
+            _last_net_ms = utime.ticks_ms()
+
+        # Web/app commands.
+        if 'cmd' in msg:
+            handle_command(msg.get('cmd'))
+        if 'command' in msg:
+            handle_command(msg.get('command'))
+        if 'action' in msg:
+            handle_command(msg.get('action'))
+
+        # Legacy setup messages remain supported. Missing values retain their
+        # current value; the full combined candidate must still validate.
+        config_keys = ('vent_distance', 'min_distance', 'max_distance', 'light_level_on')
+        if any(k in msg for k in config_keys):
+            if not _settings_ready and not all(k in msg for k in config_keys):
+                send_settings_ack(msg.get('settings_token'), False, 'initial settings must include all four values')
+                return
+            candidate = {'vent_distance': DOOR_VENT_IN, 'min_distance': DOOR_OPEN_IN,
+                         'max_distance': DOOR_CLOSED_IN, 'light_level_on': LIGHT_LEVEL_ON}
+            candidate.update({k: msg[k] for k in config_keys if k in msg})
+            apply_confirmed_settings(candidate, msg.get('settings_token'))
+
+    except Exception:
+        # With buffered UART, parse errors should be rare. During update mode,
+        # ignore bad lines instead of replying bad_json, because that can cause
+        # the Zero to wait on the wrong response while the Pico is still alive.
+        if UPDATE_MODE:
+            return
+
+        # Also support plain text commands like STOP, OPEN, CLOSE, VENT, LIGHT.
+        handle_command(line_str)
+
+
+def send_uart_health(reason):
+    """Send a compact UART diagnostic message to the Pi."""
+    try:
+        uart.write(ujson.dumps({
+            "uart_health": reason,
+            "rx_errors": _uart_error_count,
+            "recoveries": _uart_recovery_count,
+            "rx_buffer_len": len(_uart_rx_buffer),
+            "ms": utime.ticks_ms(),
+        }) + "\n")
+    except Exception:
+        pass
+
+
+def rebuild_uart(reason="unknown"):
+    """
+    Reinitialize UART only after an actual receive exception or buffer overflow.
+    Normal silence, delayed heartbeats, and ordinary partial chunks do not
+    trigger a UART rebuild. This avoids making HTML commands temporarily dead.
+    """
+    global uart, _uart_rx_buffer, _uart_partial_since_ms
+    global _uart_last_recovery_ms, _uart_error_count, _uart_recovery_count
+
+    if UPDATE_MODE:
+        return False
+
+    now = utime.ticks_ms()
+    if utime.ticks_diff(now, _uart_last_recovery_ms) < UART_RECOVERY_COOLDOWN_MS:
+        return False
+
+    _uart_last_recovery_ms = now
+    _uart_error_count += 1
+
+    try:
+        try:
+            uart.deinit()
+        except Exception:
+            pass
+
+        time.sleep_ms(50)
+        uart = UART(0, baudrate=115200, tx=Pin(0), rx=Pin(1), rxbuf=8192)
+        _uart_rx_buffer = b""
+        _uart_partial_since_ms = None
+        _uart_recovery_count += 1
+        send_uart_health("recovered:" + str(reason))
+        return True
+    except Exception as e:
+        try:
+            print("UART rebuild failed:", e)
+        except Exception:
+            pass
+        return False
+
+
+def service_uart_partial_timeout():
+    """Discard only a genuinely abandoned partial line; never during updates."""
+    global _uart_rx_buffer, _uart_partial_since_ms, _uart_error_count
+
+    if UPDATE_MODE or not _uart_rx_buffer or _uart_partial_since_ms is None:
+        return
+
+    now = utime.ticks_ms()
+    if utime.ticks_diff(now, _uart_partial_since_ms) > UART_PARTIAL_LINE_TIMEOUT_MS:
+        dropped = len(_uart_rx_buffer)
+        _uart_rx_buffer = b""
+        _uart_partial_since_ms = None
+        _uart_error_count += 1
+        send_uart_health("partial_timeout_dropped_" + str(dropped))
+
+
+def check_uart():
+    global _uart_rx_buffer, _uart_partial_since_ms, _uart_error_count
+
+    # Process only complete newline-terminated messages. A partial line is kept
+    # for up to five seconds, which is long enough for normal commands and does
+    # not interfere with the UART firmware updater.
+    try:
+        while uart.any():
+            chunk = uart.read()
+            if not chunk:
+                break
+
+            if not _uart_rx_buffer:
+                _uart_partial_since_ms = utime.ticks_ms()
+            _uart_rx_buffer += chunk
+
+            if len(_uart_rx_buffer) > MAX_UART_BUFFER:
+                dropped = len(_uart_rx_buffer)
+                _uart_rx_buffer = b""
+                _uart_partial_since_ms = None
+                _uart_error_count += 1
+
+                if UPDATE_MODE:
+                    send_update_status("failed", reason="rx_buffer_overflow")
+                else:
+                    send_uart_health("overflow_dropped_" + str(dropped))
+                    rebuild_uart("rx_buffer_overflow")
+                break
+
+            while b"\n" in _uart_rx_buffer:
+                line, _uart_rx_buffer = _uart_rx_buffer.split(b"\n", 1)
+                _uart_partial_since_ms = utime.ticks_ms() if _uart_rx_buffer else None
+                try:
+                    line_str = line.decode().strip()
+                except Exception:
+                    line_str = ""
+                _process_uart_line(line_str)
+
+        service_uart_partial_timeout()
+
+    except Exception as e:
+        if not UPDATE_MODE:
+            rebuild_uart("check_exception:" + str(e))
+
+# ----------------------------
+# Movement control (robust comparisons)
+# ----------------------------
+# Verified motion controls. Distances remain supplied by the Pi setup page.
+# Initial tuning from Truck captures; validate vent lead with supervised tests.
+VERIFY_MAX_MS = 1800
+STOP_VERIFY_MAX_MS = 3000
+MOTION_SAMPLE_MS = 80
+DIRECTION_MIN_CHANGE_IN = 2.0
+STATIONARY_RANGE_IN = 1.5
+STATIONARY_SPAN_MS = 650
+LIMIT_TOLERANCE_IN = 2.0
+VENT_STOP_LEAD_CLOSE_IN = VENT_STOP_LEAD_CLOSING_IN
+VENT_STOP_LEAD_OPEN_IN = VENT_STOP_LEAD_OPENING_IN
+VENT_SETTLED_TOLERANCE_IN = VENT_STATUS_ENTER_DEADBAND_IN
+_position_fresh = False
+_last_observe_samples = []
+
+
+def _motion_service():
+    global abort_motion
+    feed_watchdog()
+    service_pulses()
+    check_uart()
+    service_button_events()
+    if UPDATE_MODE or (pending_command is not None and pending_command != active_motion_command):
+        abort_motion = True
+    return not abort_motion
+
+
+def _motion_read():
+    if not _motion_service():
+        return None
+    value = get_position(sample_count=1, delay=0.001, settle_ms=5)
+    service_pulses()
+    return value if _position_fresh else None
+
+
+def _motion_wait(ms):
+    end = utime.ticks_add(utime.ticks_ms(), ms)
+    while utime.ticks_diff(end, utime.ticks_ms()) > 0:
+        if not _motion_service():
+            return False
+        utime.sleep_ms(10)
+    return True
+
+
+def _trend(samples):
+    if len(samples) < 4:
+        return "unknown"
+    span = utime.ticks_diff(samples[-1][0], samples[0][0])
+    if span < 300:
+        return "unknown"
+    values = [p for _, p in samples]
+    first = sorted(values[:2])
+    last = sorted(values[-2:])
+    delta = (last[0] + last[1] - first[0] - first[1]) / 2.0
+    # Require two successive changes with the same sign, allowing small jitter.
+    steps = [values[i] - values[i-1] for i in range(1, len(values))]
+    if delta >= DIRECTION_MIN_CHANGE_IN and sum(1 for x in steps if x > 0.2) >= 2:
+        return "close"
+    if delta <= -DIRECTION_MIN_CHANGE_IN and sum(1 for x in steps if x < -0.2) >= 2:
+        return "open"
+    if span >= STATIONARY_SPAN_MS and max(values) - min(values) <= STATIONARY_RANGE_IN:
+        return "stationary"
+    return "unknown"
+
+
+def _limit(position):
+    if abs(position - DOOR_OPEN_IN) <= LIMIT_TOLERANCE_IN:
+        return "open"
+    if abs(position - DOOR_CLOSED_IN) <= LIMIT_TOLERANCE_IN:
+        return "close"
+    return None
+
+
+def _observe(max_ms, require_stationary=False):
+    global _last_observe_samples
+    started = utime.ticks_ms()
+    samples = []
+    _last_observe_samples = samples
+    while utime.ticks_diff(utime.ticks_ms(), started) < max_ms:
+        if not _motion_service():
+            return "aborted", None
+        p = _motion_read()
+        if p is not None:
+            samples.append((utime.ticks_ms(), p))
+            if len(samples) > 10:
+                samples.pop(0)
+            state = _trend(samples)
+            if state == "stationary" or (not require_stationary and state in ("open", "close")):
+                diag_record("observed_motion", (state, p))
+                return state, p
+        if not _motion_wait(MOTION_SAMPLE_MS):
+            return "aborted", None
+    diag_record("motion_unverified", samples[-1][1] if samples else None)
+    return "unknown", samples[-1][1] if samples else None
+
+
+def _button_and_release(reason):
+    diag_record("button_reason", reason)
+    if not motor_pulse():
+        return False
+    # Service relays before any potentially slow LIDAR transaction.
+    while _motor_pulse_active:
+        if not _motion_service():
+            return False
+        utime.sleep_ms(10)
+    return True
+
+
+def _motion_fault(reason):
+    diag_record("motion_fault", reason)
+    send_event("motion_fault_" + reason)
+    # Unknown state never causes speculative toggle pulses.
+
+
+def _stop_confirmed_motion(reason):
+    # Re-observe just before STOP. A stopped opener must never receive STOP.
+    state, p = _observe(VERIFY_MAX_MS)
+    if state == "stationary":
+        return True, p
+    if state not in ("open", "close"):
+        return False, p
+    if p is not None and _limit(p) is not None:
+        # A trend window can still say MOVING after the physical limit stops
+        # the door. Require fresh stationary evidence before another toggle.
+        state, p = _observe(STOP_VERIFY_MAX_MS, require_stationary=True)
+        return state == "stationary", p
+    if not _button_and_release(reason):
+        return False, p
+    state, p = _observe(STOP_VERIFY_MAX_MS, require_stationary=True)
+    return state == "stationary", p
+
+
+def start_move(action):
+    global vent_status, abort_motion
+    if not _settings_ready:
+        send_event("motion_blocked_settings_not_ready")
+        return
+    abort_motion = False
+    send_event("motion_" + action)
+    state, p = _observe(VERIFY_MAX_MS)
+    if p is None or state in ("unknown", "aborted"):
+        _motion_fault("initial_state_unknown")
+        return
+    target = DOOR_OPEN_IN if action == "open" else DOOR_CLOSED_IN if action == "close" else DOOR_VENT_IN
+    if action == "vent" and state == "stationary" and abs(p-target) <= VENT_SETTLED_TOLERANCE_IN:
+        update_settled_vent_status(p)
+        return
+    if action in ("open", "close") and state == "stationary" and _limit(p) == action:
+        diag_record("target_already_reached", p)
+        return
+    desired = action if action != "vent" else ("close" if p < target else "open")
+    vent_status = 0
+    send_vent_status(0)
+    corrected = False
+    if state == "stationary":
+        if not _button_and_release("initial_start"):
+            return
+        state, p = _observe(VERIFY_MAX_MS)
+    # Correction is permitted only during initial acquisition, never after a
+    # confirmed correct run reverses (e.g. the opener's obstruction response).
+    if state in ("open", "close") and state != desired:
+        stopped, p = _stop_confirmed_motion("wrong_direction_stop")
+        if not stopped:
+            _motion_fault("stop_unconfirmed")
+            return
+        corrected = True
+        if not _button_and_release("restart_opposite"):
+            return
+        state, p = _observe(VERIFY_MAX_MS)
+    elif state == "stationary" and _limit(p) is not None and _limit(p) != desired:
+        # Wrong initial travel already ended at the opposite limit: one START,
+        # no unnecessary STOP pulse at an automatically stopped travel limit.
+        corrected = True
+        if not _button_and_release("leave_opposite_limit"):
+            return
+        state, p = _observe(VERIFY_MAX_MS)
+    if state == "stationary" and action in ("open", "close") and _limit(p) == action:
+        diag_record("target_reached", p)
+        return
+    if state != desired:
+        _motion_fault("direction_unconfirmed")
+        return
+    diag_record("direction_confirmed", (desired, corrected, p))
+    started = utime.ticks_ms()
+    history = list(_last_observe_samples)
+    last_fresh = started
+    while utime.ticks_diff(utime.ticks_ms(), started) < MAX_TIMEOUT * 1000:
+        if not _motion_service():
+            return
+        q = _motion_read()
+        if q is not None:
+            p = q
+            last_fresh = utime.ticks_ms()
+            history.append((last_fresh, p))
+            if len(history) > 10:
+                history.pop(0)
+            actual = _trend(history)
+            if actual in ("open", "close") and actual != desired:
+                _motion_fault("unexpected_reversal")
+                return
+            if action == "vent":
+                lead = VENT_STOP_LEAD_CLOSE_IN if desired == "close" else VENT_STOP_LEAD_OPEN_IN
+                trigger = p >= target - lead if desired == "close" else p <= target + lead
+                if trigger:
+                    # Recent trend must still prove movement before toggling.
+                    if actual == desired:
+                        if not _button_and_release("vent_target_stop"):
+                            return
+                        state, settled = _observe(STOP_VERIFY_MAX_MS, require_stationary=True)
+                        if state == "stationary":
+                            diag_record("vent_settled_in", settled)
+                            update_settled_vent_status(settled)
+                            if abs(settled - target) > VENT_SETTLED_TOLERANCE_IN:
+                                _motion_fault("vent_outside_tolerance")
+                        else:
+                            _motion_fault("vent_stop_unconfirmed")
+                        return
+                    if actual == "stationary":
+                        _motion_fault("vent_stopped_early")
+                        return
+            if actual == "stationary":
+                if action in ("open", "close") and _limit(p) == action:
+                    diag_record("target_reached", p)
+                else:
+                    _motion_fault("stopped_before_target")
+                return
+        if utime.ticks_diff(utime.ticks_ms(), last_fresh) > 2500:
+            _motion_fault("lidar_stale")
+            return
+        if not _motion_wait(MOTION_SAMPLE_MS):
+            return
+    _motion_fault("travel_timeout")
+
+
+# ----------------------------
+# Interrupt bindings
+# ----------------------------
+# IRQ handlers must not sleep, allocate JSON, write UART, touch dictionaries,
+# or start timers. Each handler records a falling-edge time and accepts the
+# command only on a rising edge after the input remained LOW for at least
+# INPUT_MIN_LOW_MS. Brief electrical spikes are discarded.
+BUTTON_OPEN_MASK = 0x01
+BUTTON_CLOSE_MASK = 0x02
+BUTTON_VENT_MASK = 0x04
+BUTTON_LIGHT_MASK = 0x08
+INPUT_MIN_LOW_MS = 40
+
+_irq_pending_mask = 0
+_open_low_since_ms = 0
+_close_low_since_ms = 0
+_vent_low_since_ms = 0
+_light_low_since_ms = 0
+_button_last_accept_ms = {
+    "open": 0,
+    "close": 0,
+    "vent": 0,
+    "light": 0,
+}
+
+
+def _irq_open(pin):
+    global _irq_pending_mask, _open_low_since_ms
+    now = utime.ticks_ms()
+    if pin.value() == 0:
+        if _open_low_since_ms == 0:
+            _open_low_since_ms = now
+    else:
+        started = _open_low_since_ms
+        _open_low_since_ms = 0
+        if started and utime.ticks_diff(now, started) >= INPUT_MIN_LOW_MS:
+            _irq_pending_mask |= BUTTON_OPEN_MASK
+
+
+def _irq_close(pin):
+    global _irq_pending_mask, _close_low_since_ms
+    now = utime.ticks_ms()
+    if pin.value() == 0:
+        if _close_low_since_ms == 0:
+            _close_low_since_ms = now
+    else:
+        started = _close_low_since_ms
+        _close_low_since_ms = 0
+        if started and utime.ticks_diff(now, started) >= INPUT_MIN_LOW_MS:
+            _irq_pending_mask |= BUTTON_CLOSE_MASK
+
+
+def _irq_vent(pin):
+    global _irq_pending_mask, _vent_low_since_ms
+    now = utime.ticks_ms()
+    if pin.value() == 0:
+        if _vent_low_since_ms == 0:
+            _vent_low_since_ms = now
+    else:
+        started = _vent_low_since_ms
+        _vent_low_since_ms = 0
+        if started and utime.ticks_diff(now, started) >= INPUT_MIN_LOW_MS:
+            _irq_pending_mask |= BUTTON_VENT_MASK
+
+
+def _irq_light(pin):
+    global _irq_pending_mask, _light_low_since_ms
+    now = utime.ticks_ms()
+    if pin.value() == 0:
+        if _light_low_since_ms == 0:
+            _light_low_since_ms = now
+    else:
+        started = _light_low_since_ms
+        _light_low_since_ms = 0
+        if started and utime.ticks_diff(now, started) >= INPUT_MIN_LOW_MS:
+            _irq_pending_mask |= BUTTON_LIGHT_MASK
+
+
+def _button_ready(name, now):
+    last = _button_last_accept_ms[name]
+    if last and utime.ticks_diff(now, last) < DEBOUNCE_MS:
+        return False
+    _button_last_accept_ms[name] = now
+    return True
+
+
+def service_button_events():
+    """Consume captured edges safely outside hardware interrupt context."""
+    global _irq_pending_mask
+
+    irq_state = machine.disable_irq()
+    mask = _irq_pending_mask
+    _irq_pending_mask = 0
+    machine.enable_irq(irq_state)
+
+    if not mask:
+        return
+
+    now = utime.ticks_ms()
+    if utime.ticks_diff(now, _boot_ms) < BOOT_IGNORE_MS:
+        return
+
+    if (mask & BUTTON_OPEN_MASK) and active_motion_command != "open" and _button_ready("open", now):
+        enqueue_command("open")
+    if (mask & BUTTON_CLOSE_MASK) and active_motion_command != "close" and _button_ready("close", now):
+        enqueue_command("close")
+    if (mask & BUTTON_VENT_MASK) and active_motion_command != "vent" and _button_ready("vent", now):
+        enqueue_command("vent")
+    if (mask & BUTTON_LIGHT_MASK) and _button_ready("light", now):
+        light_turn_on_off()
+
+
+# Retain the Pin objects for the life of the program.
+stop_input = Pin(STOP_PIN, Pin.IN, Pin.PULL_UP)
+open_input = Pin(OPEN_PIN, Pin.IN, Pin.PULL_UP)
+close_input = Pin(CLOSE_PIN, Pin.IN, Pin.PULL_UP)
+vent_input = Pin(VENT_PIN, Pin.IN, Pin.PULL_UP)
+light_input = Pin(LIGHT_PIN, Pin.IN, Pin.PULL_UP)
+
+# STOP intentionally has no IRQ handler. It cannot trigger an opener pulse.
+qualified_edges = Pin.IRQ_FALLING | Pin.IRQ_RISING
+open_input.irq(trigger=qualified_edges, handler=_irq_open)
+close_input.irq(trigger=qualified_edges, handler=_irq_close)
+vent_input.irq(trigger=qualified_edges, handler=_irq_vent)
+light_input.irq(trigger=qualified_edges, handler=_irq_light)
+
+
+# ----------------------------
+# Pi power-cycle helpers
+# ----------------------------
+def power_cycle_pi(reason="no_hb"):
+    global _last_pi_reset_ms, _last_pi_power_on_ms, _last_hb_ms, _last_net_ms
+
+    dbg("PI RESET: " + reason)
+
+    _last_pi_reset_ms = utime.ticks_ms()
+
+    # OFF
+    pi_pwr.value(0)
+    time.sleep_ms(PI_POWER_OFF_MS)
+
+    # ON
+    pi_pwr.value(1)
+    _last_pi_power_on_ms = utime.ticks_ms()
+
+    # reset timers so we don't immediately reset again
+    _last_hb_ms = utime.ticks_ms()
+    _last_net_ms = utime.ticks_ms()
+
+
+def pi_heartbeat_watchdog():
+    """
+    Heartbeat-only watchdog. NET is tracked for info but NEVER triggers reset.
+    """
+    global hb_miss_count
+    now = utime.ticks_ms()
+
+    if UPDATE_MODE:
+        hb_miss_count = 0
+        return
+
+    # boot grace
+    if utime.ticks_diff(now, _last_pi_power_on_ms) < PI_BOOT_GRACE_MS:
+        hb_miss_count = 0
+        return
+
+    # cooldown
+    if utime.ticks_diff(now, _last_pi_reset_ms) < PI_RESET_COOLDOWN_MS:
+        hb_miss_count = 0
+        return
+
+    # never reset during motion / commands
+    if pending_command is not None or stop_command:
+        hb_miss_count = 0
+        return
+
+    hb_age = utime.ticks_diff(now, _last_hb_ms)
+
+    # Heartbeat miss counting
+    if hb_age > HB_TIMEOUT_MS:
+        hb_miss_count += 1
+    else:
+        hb_miss_count = 0
+
+    if hb_miss_count >= HB_MISSES_TO_RESET:
+        dbg("WATCHDOG HB TRIP hb_age_ms=" + str(hb_age) +
+            " hb_miss=" + str(hb_miss_count))
+        power_cycle_pi("HB misses=" + str(hb_miss_count) + " age_ms=" + str(hb_age))
+        hb_miss_count = 0
+        return
+
+
+# ----------------------------
+# Main loop
+# ----------------------------
+# Motor and light relay pulses are non-blocking.
+# service_pulses() must run every loop.
+try:
+    # RP2040 supports a maximum timeout of approximately 8.3 seconds.
+    wdt = machine.WDT(timeout=8000)
+    send_event("control_watchdog_enabled")
+except Exception as e:
+    wdt = None
+    dbg("control watchdog unavailable: " + str(e))
+
+try:
+    send_event("pico_reset_cause_" + str(machine.reset_cause()))
+except Exception:
+    pass
+
+while True:
+    feed_watchdog()
+    check_uart()
+    service_pulses()
+    service_button_events()
+    pi_heartbeat_watchdog()
+
+    if UPDATE_MODE:
+        time.sleep_ms(20)
+        continue
+
+    if pending_command:
+        cmd = pending_command
+        pending_command = None
+        active_motion_command = cmd
+        diag_begin(cmd)
+        try:
+            start_move(cmd)
+        finally:
+            diag_end()
+            active_motion_command = None
+
+    # Position updates for HTML simulation and status.
+    get_position(sample_count=2, delay=0.001, settle_ms=8)
+
+    # Recovery-only LIDAR watchdog (no Pico reset)
+    lidar_health_check()
+
+    # 60s environmental updates (temp/humidity only)
+    now_ms = utime.ticks_ms()
+    if utime.ticks_diff(now_ms, _last_env_ts_ms) >= int(ENV_PERIOD_S * 1000):
+        _last_env_ts_ms = now_ms
+        send_environmental_data()
+
+    diag_flush()
+    time.sleep(LOOP_SLEEP_S)
+
+
+
