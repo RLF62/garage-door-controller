@@ -2,6 +2,10 @@
 
 The Hub brings two running [Garage Door Controllers](../README.md) into one browser dashboard. It shows door position, temperature, and Auto Vent state for each garage. The **Truck Garage**, **Car Garage**, and **Both Garages** cards provide individual and combined controls.
 
+![Dual Garage Hub mobile dashboard with Both Garages first, followed by Car Garage and Truck Garage](docs/garage-hub-mobile.png)
+
+*Mobile dashboard with the Both Garages card moved to the top.*
+
 ## Install the Hub separately
 
 Use a Raspberry Pi OS host that can reach both controller dashboards over the local network. The Hub uses port 5050 and needs no Pico, GPIO wiring, or serial connection of its own. Leave port 5050 available on the Hub host.
