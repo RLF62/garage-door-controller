@@ -22,6 +22,10 @@ A Raspberry Pi Zero 2 W runs a local web dashboard. A Raspberry Pi Pico handles 
 - [Pico firmware installation, updates, and recovery](docs/firmware.md)
 - [Architecture, endpoints, and troubleshooting](docs/reference.md)
 
+## Optional Dual Garage Hub
+
+The Hub combines two running door controllers into one dashboard with rearrangeable cards and controls for both doors. [Install the Hub separately](dual_garage/README.md).
+
 ## Dashboard screenshots
 
 | Dashboard | Door and sensor setup | Network and door controls |
@@ -36,6 +40,7 @@ A Raspberry Pi Zero 2 W runs a local web dashboard. A Raspberry Pi Pico handles 
 | [serial_reader.py](serial_reader.py), [fan_control.py](fan_control.py) | Pi-side Pico communication and enclosure fan |
 | [deploy/](deploy/), [install.sh](install.sh) | Service definitions, example configuration, and installer |
 | [pico/](pico/) | Firmware snapshot, support modules, and dependencies for a USB bootstrap |
+| [dual_garage/](dual_garage/) | Optional Dual Garage Hub with its own installation and service |
 
 The dashboard downloads updates from the separate [Pico OTA repository](https://github.com/RLF62/ota_garage_door_opener). This project includes a snapshot of its firmware at commit `4321b28998dc1124a532f241245752c33145b995`.
 

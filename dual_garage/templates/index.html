@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="/static/icon.png">
+<link rel="apple-touch-icon" href="/static/icon.png">
+<title>Garage Hub</title>
+
+<style>
+body{
+    background:#202020;
+    color:white;
+    font-family:Arial, sans-serif;
+    text-align:center;
+    margin:0;
+    padding:14px;
+}
+h1{
+    margin:10px 0 18px 0;
+    font-size:34px;
+}
+.card{
+    background:#303030;
+    border-radius:16px;
+    padding:18px;
+    margin:16px auto;
+    max-width:520px;
+    box-shadow:0 0 14px rgba(0,0,0,.45);
+}
+.both-card{
+    background:#383838;
+    border:2px solid #666;
+}
+h2{
+    margin-top:4px;
+    font-size:28px;
+}
+.status{
+    font-size:18px;
+    margin:8px;
+}
+.online{color:#35d05b;}
+.offline{color:#ff5555;}
+.position{
+    font-size:34px;
+    font-weight:bold;
+    margin:12px;
+}
+.temperature{
+    color:#7ec8ff;
+    font-size:22px;
+    font-weight:bold;
+    margin:8px 0 4px 0;
+}
+.label{
+    font-size:21px;
+    margin-top:6px;
+    letter-spacing:1px;
+}
+.vented{color:#ffc107;}
+.auto-vent-status{
+    font-size:18px;
+    font-weight:bold;
+    margin:10px 0 4px 0;
+}
+.auto-enabled{color:#35d05b;}
+.auto-disabled{color:#ff6666;}
+.auto-unknown{color:#bbb;}
+.barbox{
+    width:90%;
+    height:22px;
+    background:#111;
+    border-radius:12px;
+    margin:10px auto 18px auto;
+    overflow:hidden;
+    border:1px solid #555;
+}
+.bar{
+    height:100%;
+    width:0%;
+    background:#2196F3;
+    transition:width .35s;
+}
+.button-grid{
+    display:flex;
+    flex-wrap:wrap;
+    justify-content:center;
+    gap:10px;
+    max-width:360px;
+    margin:12px auto;
+}
+button{
+    width:150px;
+    height:58px;
+    font-size:20px;
+    border:none;
+    border-radius:14px;
+    font-weight:bold;
+    box-shadow:0 4px 0 rgba(0,0,0,.35);
+    cursor:pointer;
+}
+button:active{
+    transform:translateY(3px);
+    box-shadow:0 1px 0 rgba(0,0,0,.35);
+}
+button:disabled{
+    opacity:.55;
+    cursor:not-allowed;
+}
+.open{background:#2fa84f;color:white;}
+.close{background:#d94135;color:white;}
+.vent{background:#1e88e5;color:white;}
+.light{background:#ffc107;color:black;}
+.auto-on{background:#2fa84f;color:white;}
+.auto-off{background:#d94135;color:white;}
+.linkbtn{
+    background:#555;
+    color:white;
+    width:220px;
+    height:48px;
+    font-size:16px;
+    margin-top:8px;
+}
+.message{
+    min-height:22px;
+    margin:8px auto;
+    font-size:16px;
+    color:#ffc107;
+}
+@media(max-width:420px){
+    button{
+        width:138px;
+        height:56px;
+        font-size:18px;
+    }
+    .button-grid{
+        max-width:310px;
+        gap:9px;
+    }
+}
+[hidden] { display:none !important; }
+.layout-actions,.layout-move {
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    flex-wrap:wrap;
+    gap:8px;
+}
+.layout-actions button,.layout-move button {
+    width:auto;
+    height:auto;
+    min-height:44px;
+    padding:8px 12px;
+    background:#505050;
+    color:white;
+    font-size:15px;
+    border-radius:8px;
+}
+.layout-move { margin-bottom:12px; }
+.layout-handle { cursor:grab; touch-action:none; user-select:none; }
+.layout-dragging { opacity:.65; }
+.layout-target { outline:2px solid #7ec8ff; }
+#layout-cards.layout-editing .card > :not(h2):not(.layout-move) { display:none; }
+#layout-cards.layout-editing h2 { margin:4px 0 10px; }
+#layout-cards.layout-editing .layout-move { margin-bottom:0; }
+#layout-help { color:#ccc; font-size:14px; }
+#layout-save { background:#236c49; }
+</style>
+</head>
+
+<body>
+
+<h1>Garage Hub</h1>
+<div class="layout-actions">
+    <button type="button" id="layout-customize" aria-expanded="false" aria-controls="layout-cards" hidden>Customize Layout</button>
+    <button type="button" id="layout-save" hidden>Save Layout</button>
+    <button type="button" id="layout-reset" hidden>Reset Layout</button>
+</div>
+<p id="layout-help" role="status" hidden></p>
+<div id="message" class="message"></div>
+
+<main id="layout-cards">
+
+<div id="layout-truck" class="card">
+<h2>Truck Garage</h2>
+<div class="layout-move" role="group" aria-label="Move Truck Garage" hidden>
+    <button type="button" class="layout-handle" tabindex="-1">☰ Drag to move</button>
+    <button type="button" class="layout-up" aria-label="Move Truck Garage up">↑ Up</button>
+    <button type="button" class="layout-down" aria-label="Move Truck Garage down">↓ Down</button>
+</div>
+<div id="truck_online" class="status">Checking...</div>
+<div id="truck_temperature" class="temperature">GARAGE TEMP: --</div>
+<div id="truck_label" class="label">---</div>
+<div id="truck_pos" class="position">--%</div>
+<div class="barbox"><div id="truck_bar" class="bar"></div></div>
+<div id="truck_autovent_status" class="auto-vent-status auto-unknown">AUTO VENT: --</div>
+
+<div class="button-grid">
+<button class="open" onclick="garageCmd('truck','open')">OPEN</button>
+<button class="close" onclick="garageCmd('truck','close')">CLOSE</button>
+<button class="vent" onclick="garageCmd('truck','vent')">VENT</button>
+<button class="light" onclick="garageCmd('truck','light')">LIGHT</button>
+<button id="truck_autovent_button" class="auto-off" onclick="toggleAutoVent('truck')">AUTO VENT --</button>
+</div>
+
+<button class="linkbtn" data-url="{{ garages.truck.url }}" onclick="window.location=this.dataset.url">
+FULL CONTROLLER
+</button>
+</div>
+
+<div id="layout-car" class="card">
+<h2>Car Garage</h2>
+<div class="layout-move" role="group" aria-label="Move Car Garage" hidden>
+    <button type="button" class="layout-handle" tabindex="-1">☰ Drag to move</button>
+    <button type="button" class="layout-up" aria-label="Move Car Garage up">↑ Up</button>
+    <button type="button" class="layout-down" aria-label="Move Car Garage down">↓ Down</button>
+</div>
+<div id="car_online" class="status">Checking...</div>
+<div id="car_temperature" class="temperature">GARAGE TEMP: --</div>
+<div id="car_label" class="label">---</div>
+<div id="car_pos" class="position">--%</div>
+<div class="barbox"><div id="car_bar" class="bar"></div></div>
+<div id="car_autovent_status" class="auto-vent-status auto-unknown">AUTO VENT: --</div>
+
+<div class="button-grid">
+<button class="open" onclick="garageCmd('car','open')">OPEN</button>
+<button class="close" onclick="garageCmd('car','close')">CLOSE</button>
+<button class="vent" onclick="garageCmd('car','vent')">VENT</button>
+<button class="light" onclick="garageCmd('car','light')">LIGHT</button>
+<button id="car_autovent_button" class="auto-off" onclick="toggleAutoVent('car')">AUTO VENT --</button>
+</div>
+
+<button class="linkbtn" data-url="{{ garages.car.url }}" onclick="window.location=this.dataset.url">
+FULL CONTROLLER
+</button>
+</div>
+
+<div id="layout-both" class="card both-card">
+<h2>Both Garages</h2>
+<div class="layout-move" role="group" aria-label="Move Both Garages" hidden>
+    <button type="button" class="layout-handle" tabindex="-1">☰ Drag to move</button>
+    <button type="button" class="layout-up" aria-label="Move Both Garages up">↑ Up</button>
+    <button type="button" class="layout-down" aria-label="Move Both Garages down">↓ Down</button>
+</div>
+
+<div class="button-grid">
+<button class="open" onclick="bothCmd('open')">OPEN</button>
+<button class="close" onclick="bothCmd('close')">CLOSE</button>
+<button class="vent" onclick="bothCmd('vent')">VENT</button>
+<button class="light" onclick="bothCmd('light')">LIGHT</button>
+<button class="auto-on" onclick="setBothAutoVent(true)">AUTO VENT ON</button>
+<button class="auto-off" onclick="setBothAutoVent(false)">AUTO VENT OFF</button>
+</div>
+</div>
+
+</main>
+
+<script>
+var lastPos = {
+    truck: null,
+    car: null
+};
+
+var autoVentState = {
+    truck: null,
+    car: null
+};
+
+var POSITION_DEADBAND = 2.0;
+var messageTimer = null;
+
+function showMessage(text, isError){
+    var box = document.getElementById('message');
+    box.textContent = text;
+    box.style.color = isError ? '#ff6666' : '#35d05b';
+
+    if(messageTimer){
+        clearTimeout(messageTimer);
+    }
+    messageTimer = setTimeout(function(){
+        box.textContent = '';
+    }, 3500);
+}
+
+function garageCmd(garage, command){
+    fetch('/garage/' + garage + '/' + command, {method:'POST'})
+    .then(function(r){
+        if(!r.ok){ throw new Error('Command failed'); }
+        return r.json();
+    })
+    .then(function(){
+        showMessage(command.toUpperCase() + ' sent to ' + garage + ' garage', false);
+    })
+    .catch(function(){
+        showMessage('Could not reach ' + garage + ' garage', true);
+    });
+}
+
+function bothCmd(command){
+    var msg = command.toUpperCase() + " BOTH GARAGES?";
+    if(confirm(msg)){
+        fetch('/both/' + command, {method:'POST'})
+        .then(function(r){
+            if(!r.ok){ throw new Error('Command failed'); }
+            return r.json();
+        })
+        .then(function(){
+            showMessage(command.toUpperCase() + ' sent to both garages', false);
+        })
+        .catch(function(){
+            showMessage('One or both garages could not be reached', true);
+        });
+    }
+}
+
+function parseAutoVent(value){
+    value = String(value).trim().toLowerCase();
+    if(value === '1' || value === 'true'){ return true; }
+    if(value === '0' || value === 'false'){ return false; }
+    return null;
+}
+
+function updateAutoVent(prefix, value){
+    var enabled = parseAutoVent(value);
+    autoVentState[prefix] = enabled;
+
+    var status = document.getElementById(prefix + '_autovent_status');
+    var button = document.getElementById(prefix + '_autovent_button');
+
+    if(enabled === true){
+        status.textContent = 'AUTO VENT: ENABLED';
+        status.className = 'auto-vent-status auto-enabled';
+        button.textContent = 'TURN AUTO VENT OFF';
+        button.className = 'auto-off';
+        button.disabled = false;
+    } else if(enabled === false){
+        status.textContent = 'AUTO VENT: DISABLED';
+        status.className = 'auto-vent-status auto-disabled';
+        button.textContent = 'TURN AUTO VENT ON';
+        button.className = 'auto-on';
+        button.disabled = false;
+    } else {
+        status.textContent = 'AUTO VENT: OFFLINE';
+        status.className = 'auto-vent-status auto-unknown';
+        button.textContent = 'AUTO VENT --';
+        button.className = 'auto-off';
+        button.disabled = true;
+    }
+}
+
+function toggleAutoVent(garage){
+    var current = autoVentState[garage];
+
+    if(current === null){
+        showMessage('Auto Vent status is unavailable for ' + garage + ' garage', true);
+        return;
+    }
+
+    var enabled = !current;
+    var wording = enabled ? 'ENABLE' : 'DISABLE';
+
+    if(!confirm(wording + ' AUTO VENT FOR ' + garage.toUpperCase() + ' GARAGE?')){
+        return;
+    }
+
+    fetch('/garage/' + garage + '/auto_vent', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({enabled:enabled})
+    })
+    .then(function(r){
+        if(!r.ok){ throw new Error('Update failed'); }
+        return r.json();
+    })
+    .then(function(){
+        updateAutoVent(garage, enabled);
+        showMessage('Auto Vent ' + (enabled ? 'enabled' : 'disabled') + ' for ' + garage + ' garage', false);
+        setTimeout(updateStatus, 250);
+    })
+    .catch(function(){
+        showMessage('Could not change Auto Vent for ' + garage + ' garage', true);
+    });
+}
+
+function setBothAutoVent(enabled){
+    var wording = enabled ? 'ENABLE' : 'DISABLE';
+
+    if(!confirm(wording + ' AUTO VENT FOR BOTH GARAGES?')){
+        return;
+    }
+
+    fetch('/both/auto_vent', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({enabled:enabled})
+    })
+    .then(function(r){
+        if(!r.ok){ throw new Error('Update failed'); }
+        return r.json();
+    })
+    .then(function(){
+        updateAutoVent('truck', enabled);
+        updateAutoVent('car', enabled);
+        showMessage('Auto Vent ' + (enabled ? 'enabled' : 'disabled') + ' for both garages', false);
+        setTimeout(updateStatus, 250);
+    })
+    .catch(function(){
+        showMessage('One or both garages could not be updated', true);
+    });
+}
+
+function isVented(ventStatus){
+    return String(ventStatus).trim() === "1";
+}
+
+function doorLabel(pos, ventStatus){
+    if(pos === null){ return "OFFLINE"; }
+    if(isVented(ventStatus)){ return "VENTED"; }
+    if(pos <= 5){ return "OPEN"; }
+    if(pos >= 95){ return "CLOSED"; }
+    return "PARTIAL";
+}
+
+function barColor(pos, ventStatus){
+    if(isVented(ventStatus)){ return "#ffc107"; }
+    if(pos <= 5){ return "#2fa84f"; }
+    if(pos >= 95){ return "#d94135"; }
+    return "#1e88e5";
+}
+
+function smoothPosition(prefix, pos){
+    if(lastPos[prefix] === null){
+        lastPos[prefix] = pos;
+        return pos;
+    }
+
+    if(pos <= 5 || pos >= 95){
+        lastPos[prefix] = pos;
+        return pos;
+    }
+
+    if(Math.abs(pos - lastPos[prefix]) < POSITION_DEADBAND){
+        return lastPos[prefix];
+    }
+
+    lastPos[prefix] = pos;
+    return pos;
+}
+
+function updateGarage(prefix, garageData){
+    var online = document.getElementById(prefix + '_online');
+    var temperature = document.getElementById(prefix + '_temperature');
+    var label = document.getElementById(prefix + '_label');
+    var posBox = document.getElementById(prefix + '_pos');
+    var bar = document.getElementById(prefix + '_bar');
+
+    updateAutoVent(prefix, garageData.auto_vent_enabled);
+
+    var value = garageData.position;
+    var tempF = parseFloat(garageData.temperature_f);
+    var ventStatus = garageData.vent_status;
+    var pos = parseFloat(value);
+
+    if(isNaN(pos)){
+        online.innerHTML = "🔴 OFFLINE";
+        online.className = "status offline";
+        label.innerHTML = "OFFLINE";
+        label.className = "label";
+        posBox.innerHTML = "--%";
+        bar.style.width = "0%";
+        bar.style.background = "#777";
+        lastPos[prefix] = null;
+        temperature.textContent = isNaN(tempF)
+            ? 'GARAGE TEMP: --'
+            : 'GARAGE TEMP: ' + tempF.toFixed(1) + ' °F';
+        return;
+    }
+
+    if(pos < 0){ pos = 0; }
+    if(pos > 100){ pos = 100; }
+
+    pos = smoothPosition(prefix, pos);
+
+    online.innerHTML = "🟢 ONLINE";
+    online.className = "status online";
+
+    temperature.textContent = isNaN(tempF)
+        ? 'GARAGE TEMP: --'
+        : 'GARAGE TEMP: ' + tempF.toFixed(1) + ' °F';
+
+    label.innerHTML = doorLabel(pos, ventStatus);
+    if(isVented(ventStatus)){
+        label.className = "label vented";
+    } else {
+        label.className = "label";
+    }
+
+    posBox.innerHTML = pos.toFixed(1) + "%";
+    bar.style.width = pos + "%";
+    bar.style.background = barColor(pos, ventStatus);
+}
+
+function updateStatus(){
+    fetch('/status', {cache:'no-store'})
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+        updateGarage('truck', data.truck);
+        updateGarage('car', data.car);
+    })
+    .catch(function(){
+        updateGarage('truck', {
+            position:'OFFLINE',
+            temperature_f:'OFFLINE',
+            vent_status:'0',
+            auto_vent_enabled:'OFFLINE'
+        });
+        updateGarage('car', {
+            position:'OFFLINE',
+            temperature_f:'OFFLINE',
+            vent_status:'0',
+            auto_vent_enabled:'OFFLINE'
+        });
+    });
+}
+
+setInterval(updateStatus, 1000);
+updateStatus();
+(function(){
+    const container = document.getElementById('layout-cards');
+    const cards = Array.from(container.children);
+    const defaultOrder = cards.map(card => card.id);
+    const customize = document.getElementById('layout-customize');
+    const save = document.getElementById('layout-save');
+    const reset = document.getElementById('layout-reset');
+    const help = document.getElementById('layout-help');
+    const mobile = window.matchMedia('(max-width:700px)');
+    const sessionOrders = new Map();
+    let editing = false;
+    let drag = null;
+
+    function storageKey(){
+        return 'dual-garage-layout-' + (mobile.matches ? 'mobile' : 'desktop');
+    }
+
+    function applyOrder(order){
+        order.forEach(id => container.append(document.getElementById(id)));
+    }
+
+    function restoreOrder(){
+        const key = storageKey();
+        let order = sessionOrders.get(key);
+        if(!order){
+            try {
+                order = JSON.parse(localStorage.getItem(key));
+            } catch {
+                order = null;
+            }
+        }
+        const valid = Array.isArray(order) && order.length === cards.length
+            && defaultOrder.every(id => order.includes(id));
+        applyOrder(valid ? order : defaultOrder);
+    }
+
+    function updateMoveButtons(){
+        cards.forEach(card => {
+            card.querySelector('.layout-up').disabled = !card.previousElementSibling;
+            card.querySelector('.layout-down').disabled = !card.nextElementSibling;
+        });
+    }
+
+    function clearDrag(){
+        if(!drag) return;
+        drag.card.classList.remove('layout-dragging');
+        drag.target?.classList.remove('layout-target');
+        drag = null;
+    }
+
+    function setEditing(enabled){
+        clearDrag();
+        editing = enabled;
+        container.classList.toggle('layout-editing', enabled);
+        customize.textContent = enabled ? 'Cancel Editing' : 'Customize Layout';
+        customize.setAttribute('aria-expanded', String(enabled));
+        save.hidden = reset.hidden = help.hidden = !enabled;
+        help.textContent = enabled
+            ? 'Drag a card onto another card or use its Up and Down buttons. Save to keep this ' +
+                (mobile.matches ? 'mobile' : 'desktop') + ' layout.'
+            : '';
+        cards.forEach(card => {
+            card.querySelector('.layout-move').hidden = !enabled;
+        });
+        updateMoveButtons();
+    }
+
+    cards.forEach(card => {
+        const controls = card.querySelector('.layout-move');
+        const handle = controls.querySelector('.layout-handle');
+        const up = controls.querySelector('.layout-up');
+        const down = controls.querySelector('.layout-down');
+
+        up.addEventListener('click', () => {
+            const previous = card.previousElementSibling;
+            if(!editing || !previous) return;
+            previous.before(card);
+            updateMoveButtons();
+            (up.disabled ? down : up).focus();
+        });
+        down.addEventListener('click', () => {
+            const next = card.nextElementSibling;
+            if(!editing || !next) return;
+            next.after(card);
+            updateMoveButtons();
+            (down.disabled ? up : down).focus();
+        });
+
+        function targetAt(event){
+            const target = document.elementFromPoint(event.clientX, event.clientY)?.closest('.card');
+            return cards.includes(target) && target !== card ? target : null;
+        }
+
+        handle.addEventListener('pointerdown', event => {
+            if(!editing || drag || !event.isPrimary || event.button !== 0) return;
+            event.preventDefault();
+            handle.setPointerCapture(event.pointerId);
+            drag = {card, pointerId:event.pointerId, target:null};
+            card.classList.add('layout-dragging');
+        });
+        handle.addEventListener('pointermove', event => {
+            if(drag?.card !== card || drag.pointerId !== event.pointerId) return;
+            drag.target?.classList.remove('layout-target');
+            drag.target = targetAt(event);
+            drag.target?.classList.add('layout-target');
+        });
+        handle.addEventListener('pointerup', event => {
+            if(drag?.card !== card || drag.pointerId !== event.pointerId) return;
+            const target = targetAt(event);
+            clearDrag();
+            if(!target) return;
+            if(card.compareDocumentPosition(target) & Node.DOCUMENT_POSITION_FOLLOWING){
+                target.after(card);
+            } else {
+                target.before(card);
+            }
+            updateMoveButtons();
+        });
+        handle.addEventListener('lostpointercapture', event => {
+            if(drag?.card === card && drag.pointerId === event.pointerId) clearDrag();
+        });
+    });
+
+    customize.addEventListener('click', () => {
+        if(editing) restoreOrder();
+        setEditing(!editing);
+    });
+    save.addEventListener('click', () => {
+        const order = Array.from(container.children, card => card.id);
+        const key = storageKey();
+        sessionOrders.set(key, order);
+        setEditing(false);
+        customize.focus();
+        try {
+            localStorage.setItem(key, JSON.stringify(order));
+        } catch {
+            help.hidden = false;
+            help.textContent = 'Browser storage is unavailable. This layout will last until you reload.';
+        }
+    });
+    reset.addEventListener('click', () => {
+        applyOrder(defaultOrder);
+        updateMoveButtons();
+    });
+    mobile.addEventListener('change', () => {
+        setEditing(false);
+        restoreOrder();
+    });
+    restoreOrder();
+    customize.hidden = false;
+})();
+</script>
+
+</body>
+</html>

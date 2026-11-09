@@ -1,0 +1,3 @@
+# Replace both example URLs with your individual controller dashboard URLs.
+TRUCK_GARAGE_URL=http://192.0.2.10:5000
+CAR_GARAGE_URL=http://192.0.2.11:5000

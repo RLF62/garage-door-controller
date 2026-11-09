@@ -1,0 +1,16 @@
+[Unit]
+Description=Dual Garage Hub Dashboard
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+DynamicUser=yes
+WorkingDirectory=/opt/dual-garage-hub
+EnvironmentFile=/etc/dual-garage-hub.conf
+ExecStart=/usr/bin/gunicorn --bind 0.0.0.0:5050 --threads 8 app:app
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
